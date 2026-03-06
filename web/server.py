@@ -348,30 +348,29 @@ async def api_ops_abort(op_id: str):
         )
         await session.commit()
         
-    # 2. 直接kill进程
+    # 2. 直接强杀整个进程组
+    # 由于进程以 start_new_session=True 启动，Agent 及其所有子进程（MCP工具等）
+    # 都在同一个独立进程组中，使用 os.killpg + SIGKILL 可以一次性全部终止
     process_killed = False
     if op_id in _running_processes:
         proc = _running_processes[op_id]
         try:
-            # 检查进程是否还在运行
             if proc.poll() is None:
-                # 发送SIGTERM信号优雅终止
-                proc.terminate()
-                # 等待最多3秒让进程退出
                 try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    # 如果还没退出，强制kill
-                    proc.kill()
+                    # 直接 SIGKILL 整个进程组，确保所有子进程都被终止
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
                     proc.wait()
+                except ProcessLookupError:
+                    # 进程在 kill 之前已经退出
+                    pass
                 process_killed = True
-                _sse_logger.info(f"Process for op_id '{op_id}' terminated (PID: {proc.pid})")
+                _sse_logger.info(f"Process group for op_id '{op_id}' killed (PID: {proc.pid})")
             else:
                 _sse_logger.info(f"Process for op_id '{op_id}' already exited")
         except Exception as e:
             _sse_logger.error(f"Failed to kill process for op_id '{op_id}': {e}")
         finally:
-            # 从跟踪字典中移除
             del _running_processes[op_id]
     else:
         _sse_logger.warning(f"No tracked process found for op_id '{op_id}'")

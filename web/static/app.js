@@ -29,7 +29,7 @@ const causalColors = {
   'KeyFact': '#fbbf24',
   'Flag': '#ef4444'
 };
-let state = { op_id: new URLSearchParams(location.search).get('op_id') || '', view: 'exec', simulation: null, svg: null, g: null, zoom: null, es: null, processedEvents: new Set(), pendingReq: null, isModifyMode: false, currentPhase: null, missionAccomplished: false, userHasInteracted: false, lastActiveNodeId: null, isProgrammaticZoom: false, renderDebounceTimer: null, lastRenderTime: 0, isLoadingHistory: false, collapsedNodes: new Set(), userExpandedNodes: new Set(), leftSidebarCollapsed: false, rightSidebarCollapsed: false };
+let state = { op_id: new URLSearchParams(location.search).get('op_id') || '', view: 'exec', simulation: null, svg: null, g: null, zoom: null, es: null, processedEvents: new Set(), pendingReq: null, isModifyMode: false, currentPhase: null, missionAccomplished: false, isAborted: false, taskStatus: null, userHasInteracted: false, lastActiveNodeId: null, isProgrammaticZoom: false, renderDebounceTimer: null, lastRenderTime: 0, isLoadingHistory: false, collapsedNodes: new Set(), userExpandedNodes: new Set(), leftSidebarCollapsed: false, rightSidebarCollapsed: false };
 const api = (p, b) => fetch(p + (p.includes('?') ? '&' : '?') + `op_id=${state.op_id}`, b ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) } : {}).then(r => r.json());
 
 // 显示阶段横幅
@@ -37,8 +37,8 @@ function showPhaseBanner(phase) {
   const banner = document.getElementById('phase-banner');
   const text = document.getElementById('phase-text');
 
-  // 如果任务已完成，不再显示中间状态
-  if (state.missionAccomplished) return;
+  // 如果任务已完成、中止或失败，不再显示中间状态
+  if (state.missionAccomplished || state.isAborted || (state.taskStatus && (state.taskStatus.aborted || state.taskStatus.failed || state.taskStatus.achieved))) return;
 
   if (phase) {
     text.textContent = t('phase.' + phase);
@@ -52,21 +52,38 @@ function showPhaseBanner(phase) {
 
 // 隐藏阶段横幅
 function hidePhaseBanner() {
-  document.getElementById('phase-banner').style.display = 'none';
+  const banner = document.getElementById('phase-banner');
+  if (banner) {
+    banner.style.display = 'none';
+    banner.style.background = ''; // 重置由于成功/终止导致的背景色覆盖
+  }
   state.currentPhase = null;
 }
 
-// 显示任务完成横幅
+// 显示任务成功横幅
 function showSuccessBanner() {
   const banner = document.getElementById('phase-banner');
   const spinner = banner.querySelector('.spinner');
-  const text = document.getElementById('phase-text'); // [Fix] Use ID selector instead of class selector
+  const text = document.getElementById('phase-text');
 
-  // 隐藏旋转图标，改为成功图标
   if (spinner) spinner.style.display = 'none';
 
   text.textContent = '🎉 ' + t('status.mission_accomplished');
   banner.style.background = 'linear-gradient(90deg, rgba(16, 185, 129, 0.9), rgba(5, 150, 105, 0.9))';
+  banner.style.display = 'block';
+}
+
+// 显示任务已终止横幅
+function showAbortedBanner() {
+  const banner = document.getElementById('phase-banner');
+  const spinner = banner.querySelector('.spinner');
+  const text = document.getElementById('phase-text');
+
+  if (spinner) spinner.style.display = 'none';
+
+  const isZh = (window.currentLang || 'zh') === 'zh';
+  text.textContent = isZh ? '⛔ 任务已手动终止' : '⛔ Task Aborted';
+  banner.style.background = 'rgba(239, 68, 68, 0.95)'; // 红色警示
   banner.style.display = 'block';
 }
 
@@ -81,7 +98,13 @@ async function loadOps() {
     const data = await fetch('/api/ops').then(r => r.json());
     const list = document.getElementById('ops'); list.innerHTML = '';
     data.items.forEach(i => {
-      const li = document.createElement('li'); li.className = `task-card ${i.op_id === state.op_id ? 'active' : ''}`; li.dataset.op = i.op_id; li.onclick = () => selectOp(i.op_id, false);
+      const li = document.createElement('li');
+      li.className = `task-card ${i.op_id === state.op_id ? 'active' : ''}`;
+      li.dataset.op = i.op_id;
+      li.dataset.statusAborted = i.status.aborted ? 'true' : 'false';
+      li.dataset.statusAchieved = i.status.achieved ? 'true' : 'false';
+      li.dataset.statusFailed = i.status.failed ? 'true' : 'false';
+      li.onclick = () => selectOp(i.op_id, false);
 
       let color = 'var(--accent-primary)'; // Default: in progress / pending
       if (i.status.achieved) color = 'var(--success)';
@@ -90,6 +113,14 @@ async function loadOps() {
 
       // 显示名称：优先使用task_id（name字段），否则使用goal的前30字符
       const displayName = i.task_id || (i.goal ? i.goal.slice(0, 30) + (i.goal.length > 30 ? '...' : '') : 'Unnamed');
+
+      if (i.op_id === state.op_id) {
+        state.taskStatus = i.status;
+        // 如果当前选中任务已是终态，确保移除所有过程横幅
+        if (i.status.aborted || i.status.achieved || i.status.failed) {
+          hidePhaseBanner();
+        }
+      }
 
       li.innerHTML = `<div class="flex justify-between mb-1">
           <span style="font-family:monospace;font-size:10px;opacity:0.7">#${i.op_id.slice(-4)}</span>
@@ -182,7 +213,7 @@ async function saveOpsOrder(order) {
 
 async function deleteOp(e, id) {
   e.stopPropagation();
-  
+
   const isZh = (window.currentLang || 'zh') === 'zh';
   const ok = await showConfirmModal({
     title: isZh ? '删除任务' : 'Delete Task',
@@ -194,7 +225,7 @@ async function deleteOp(e, id) {
     danger: true
   });
   if (!ok) return;
-  
+
   await fetch(`/api/ops/${id}`, { method: 'DELETE' });
   if (state.op_id === id) {
     state.op_id = '';
@@ -273,6 +304,22 @@ function selectOp(id, refresh = true) {
   document.getElementById('llm-stream').innerHTML = '';
   state.processedEvents.clear(); // [Fix] Clear processed events history so they can be re-rendered
   state.missionAccomplished = false; // [Fix] Reset mission status when switching tasks
+
+  // 切换任务时，从侧边栏读取该任务的状态，以防刷新后丢失终止标志
+  state.isAborted = false;
+  state.taskStatus = null;
+  const targetCard = document.querySelector(`.task-card[data-op="${id}"]`);
+  if (targetCard) {
+    state.taskStatus = {
+      aborted: targetCard.dataset.statusAborted === 'true',
+      achieved: targetCard.dataset.statusAchieved === 'true',
+      failed: targetCard.dataset.statusFailed === 'true'
+    };
+    if (state.taskStatus.aborted) {
+      state.isAborted = true;
+    }
+  }
+
   state.collapsedNodes.clear(); // 重置折叠节点
   state.userExpandedNodes.clear(); // 重置用户展开节点
   state.userHasInteracted = false; // 切换任务时重置用户交互标志，允许自动聚焦
@@ -283,7 +330,13 @@ function selectOp(id, refresh = true) {
   if (state.placeholderRootNode && state.placeholderRootNode.id !== id) {
     state.placeholderRootNode = null;
   }
-  hidePhaseBanner(); // 隐藏阶段横幅，等待正确状态加载
+
+  if (state.isAborted) {
+    showAbortedBanner();
+  } else {
+    hidePhaseBanner(); // 隐藏阶段横幅，等待正确状态加载
+  }
+
   document.getElementById('node-detail-content').innerHTML = '<div style="padding:20px;text-align:center;color:#64748b">Loading...</div>';
   closeDetails();
   if (state.es) state.es.close(); subscribe(); render(true); if (refresh) loadOps();
@@ -323,13 +376,16 @@ async function render(force) {
 
     drawForceGraph(data);
     updateLegend();
-    
+
     // 检测规划完成：如果有子任务且当前处于 planning 阶段，切换为 executing
     if (state.currentPhase === 'planning' && data && data.nodes) {
-      const hasSubTasks = data.nodes.some(n => n.type === 'task' && n.id !== state.op_id);
-      if (hasSubTasks) {
-        showPhaseBanner('executing');
-        console.log('Planning completed, detected subtasks, switching to executing phase');
+      // 避免在于已中止/完成的状态下强行显示 executing
+      if (!state.isAborted && (!state.taskStatus || !(state.taskStatus.aborted || state.taskStatus.failed || state.taskStatus.achieved))) {
+        const hasSubTasks = data.nodes.some(n => n.type === 'task' && n.id !== state.op_id);
+        if (hasSubTasks) {
+          showPhaseBanner('executing');
+          console.log('Planning completed, detected subtasks, switching to executing phase');
+        }
       }
     }
   } catch (e) { console.error(e); }
@@ -2310,7 +2366,7 @@ async function submitCreateTask() {
       closeModals();
       // 等待任务列表刷新完成
       await loadOps();
-      
+
       // 创建占位主任务节点（立即显示）
       state.placeholderRootNode = {
         id: r.op_id,
@@ -2320,7 +2376,7 @@ async function submitCreateTask() {
         description: goal,
         placeholder: true
       };
-      
+
       // 选择新任务并开始渲染
       selectOp(r.op_id);
       // 立即显示规划中横幅（在 selectOp 之后，避免被重置）
@@ -2351,7 +2407,7 @@ async function abortOp() {
     danger: true
   });
   if (!ok) return;
-  
+
   try {
     const r = await api(`/api/ops/${state.op_id}/abort`, {});
     if (r.ok) {
@@ -2359,22 +2415,12 @@ async function abortOp() {
       hidePhaseBanner();
 
       // 更新状态，防止继续显示执行中状态
+      state.isAborted = true;
       state.missionAccomplished = false;
       state.currentPhase = null;
 
-      // 显示终止横幅
-      const banner = document.getElementById('phase-banner');
-      const text = document.getElementById('phase-text');
-      if (banner && text) {
-        text.textContent = currentLang === 'zh' ? '⛔ 任务已终止' : '⛔ Task Aborted';
-        banner.style.background = 'rgba(239, 68, 68, 0.95)';
-        banner.style.display = 'block';
-        // 3秒后隐藏
-        setTimeout(() => {
-          banner.style.display = 'none';
-          banner.style.background = 'rgba(59,130,246,0.95)';
-        }, 3000);
-      }
+      // 显示持久的终止横幅
+      showAbortedBanner();
 
       // 刷新任务列表
       loadOps();
