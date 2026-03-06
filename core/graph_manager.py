@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import asyncio
+import re
 import networkx as nx
 from networkx.readwrite import json_graph
 from rich.tree import Tree
@@ -62,6 +63,9 @@ class GraphManager:
         self.graph = nx.DiGraph()
         self.causal_graph = nx.DiGraph()
         self._execution_counter = 0
+        self._causal_graph_version = 0
+        self._attack_paths_cache: List[Dict[str, Any]] = []
+        self._attack_paths_cache_version = -1
         self.op_id = op_id  # This is the session_id in DB
         
         # Initialize session in DB if op_id is provided
@@ -88,6 +92,10 @@ class GraphManager:
         
         if self.op_id:
             schedule_coroutine(upsert_node(self.op_id, self.task_id, 'task', node_data))
+
+    def _touch_causal_graph(self) -> None:
+        self._causal_graph_version += 1
+        self._attack_paths_cache_version = -1
 
     def _sync_node(self, node_id: str, graph_type: str = 'task') -> None:
         """Helper to sync a node to DB asynchronously."""
@@ -172,10 +180,32 @@ class GraphManager:
         fact_id = f"key_fact_{hash(fact_content)}"
 
         if not self.causal_graph.has_node(fact_id):
-            self.causal_graph.add_node(fact_id, type="key_fact", description=fact_content, created_at=time.time())
+            self.causal_graph.add_node(
+                fact_id,
+                type="key_fact",
+                node_type="KeyFact",
+                description=fact_content,
+                created_at=time.time(),
+            )
+            self._touch_causal_graph()
             self._sync_node(fact_id, 'causal')
             logging.debug(f"GraphManager: Added new key_fact to causal graph: {fact_content}")
         return fact_id
+
+    @staticmethod
+    def _is_temporary_causal_id(node_id: Optional[str]) -> bool:
+        if not isinstance(node_id, str):
+            return False
+        value = node_id.strip().lower()
+        if not value:
+            return False
+        if value in {"none", "null", "id", "node", "temp", "tmp", "placeholder"}:
+            return True
+        if value.startswith(("temp_", "tmp_", "example_", "placeholder_")):
+            return True
+        if re.match(r"^temp(?:_?node)?(?:_\d+|\d+)?$", value):
+            return True
+        return False
 
     def add_causal_node(self, artifact: Dict) -> str:
         legacy_type = artifact.get("type")
@@ -197,8 +227,13 @@ class GraphManager:
             else:
                 artifact["node_type"] = "Unknown"
         try:
-            if artifact.get("id"):
-                node_id = artifact["id"]
+            provided_id = artifact.get("id")
+            use_provided_id = isinstance(provided_id, str) and provided_id.strip() and not self._is_temporary_causal_id(provided_id)
+            if use_provided_id:
+                node_id = provided_id.strip()
+            else:
+                if isinstance(provided_id, str) and provided_id.strip():
+                    artifact["external_id"] = provided_id.strip()
             source_step = artifact.get("source_step_id", "")
             raw_output = artifact.get("raw_output", "")
             unique_content = f"{source_step}-{raw_output}"
@@ -207,7 +242,8 @@ class GraphManager:
             hasher = hashlib.sha256()
             hasher.update(unique_content.encode("utf-8", errors="replace"))
             digest = hasher.hexdigest()[:16]
-            node_id = artifact.get("id", f"art_{digest}__{artifact.get('node_type', 'unknown')}")
+            if not use_provided_id:
+                node_id = f"art_{digest}__{artifact.get('node_type', 'unknown')}"
         except Exception:
             node_id = f"art_{uuid.uuid4().hex}"
 
@@ -218,6 +254,7 @@ class GraphManager:
                 artifact["status"] = artifact.get("status", "CONFIRMED")
 
             self.causal_graph.add_node(node_id, **artifact)
+            self._touch_causal_graph()
             self._sync_node(node_id, 'causal')
 
         return node_id
@@ -229,6 +266,7 @@ class GraphManager:
         if self.causal_graph.has_node(source_artifact_id) and self.causal_graph.has_node(target_artifact_id):
             standardized_label = self._standardize_edge_label(label)
             self.causal_graph.add_edge(source_artifact_id, target_artifact_id, label=standardized_label, **attrs)
+            self._touch_causal_graph()
             self._sync_edge(source_artifact_id, target_artifact_id, 'causal')
         else:
             logging.warning(
@@ -304,6 +342,7 @@ class GraphManager:
             if label == "CONTRADICTS":
                 self.causal_graph.nodes[hypothesis_id]["re_evaluation_needed"] = True
                 self.causal_graph.nodes[hypothesis_id]["status"] = "RE_EVALUATION_PENDING"
+                self._touch_causal_graph()
                 self._sync_node(hypothesis_id, 'causal')
             return
 
@@ -352,6 +391,7 @@ class GraphManager:
                 self.causal_graph.nodes[hypothesis_id]["status"] = "CONTRADICTED"
 
         self.causal_graph.nodes[hypothesis_id]["confidence"] = new_confidence
+        self._touch_causal_graph()
         self._sync_node(hypothesis_id, 'causal')
         
         node_status = self.causal_graph.nodes[hypothesis_id].get("status")
@@ -407,19 +447,43 @@ class GraphManager:
         # 2. 默认为偶然性证据 (Conservative Default)
         return EvidenceStrength.CONTINGENT
 
-    def analyze_attack_paths(self) -> List[Dict[str, Any]]:
-        attack_paths = []
+    def analyze_attack_paths(
+        self,
+        max_pairs: int = 100,
+        max_paths_per_pair: int = 5,
+        max_path_length: int = 6,
+        use_cache: bool = True,
+    ) -> List[Dict[str, Any]]:
+        if use_cache and self._attack_paths_cache_version == self._causal_graph_version:
+            return list(self._attack_paths_cache)
+
+        attack_paths: List[Dict[str, Any]] = []
         evidence_nodes = [n for n, d in self.causal_graph.nodes(data=True) if (d.get("node_type") or d.get("type")) == "Evidence"]
         vulnerability_nodes = [n for n, d in self.causal_graph.nodes(data=True) if (d.get("node_type") in {"Vulnerability", "PossibleVulnerability", "ConfirmedVulnerability"} or d.get("type") in {"Vulnerability", "PossibleVulnerability", "ConfirmedVulnerability"})]
 
         if not evidence_nodes or not vulnerability_nodes:
+            self._attack_paths_cache = []
+            self._attack_paths_cache_version = self._causal_graph_version
             return []
 
+        pair_count = 0
         for source in evidence_nodes:
             for target in vulnerability_nodes:
+                pair_count += 1
+                if pair_count > max_pairs:
+                    break
                 try:
-                    paths = list(nx.all_simple_paths(self.causal_graph, source=source, target=target))
-                    for path in paths:
+                    generated_paths = 0
+                    for path in nx.all_simple_paths(
+                        self.causal_graph,
+                        source=source,
+                        target=target,
+                        cutoff=max_path_length,
+                    ):
+                        generated_paths += 1
+                        if generated_paths > max_paths_per_pair:
+                            break
+
                         path_score = 1.0
                         path_details = []
                         for node_id in path:
@@ -430,16 +494,28 @@ class GraphManager:
                                 "description": node_data.get("description", ""),
                             })
                             if node_data.get("node_type") == "Hypothesis":
-                                path_score *= node_data.get("confidence", 0.1)
+                                try:
+                                    path_score *= float(node_data.get("confidence", 0.1))
+                                except (ValueError, TypeError):
+                                    path_score *= 0.1
 
                         vuln_data = self.causal_graph.nodes[target]
-                        cvss_score = vuln_data.get("cvss_score", 0.0)
+                        cvss_raw = vuln_data.get("cvss_score", 0.0)
+                        try:
+                            cvss_score = float(cvss_raw)
+                        except (ValueError, TypeError):
+                            cvss_score = 0.0
                         final_score = path_score * (cvss_score / 10.0)
                         attack_paths.append({"path": path_details, "score": final_score})
-                except nx.NetworkXNoPath:
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
                     continue
+            if pair_count > max_pairs:
+                break
 
-        return sorted(attack_paths, key=lambda x: x["score"], reverse=True)
+        sorted_paths = sorted(attack_paths, key=lambda x: x["score"], reverse=True)
+        self._attack_paths_cache = sorted_paths
+        self._attack_paths_cache_version = self._causal_graph_version
+        return list(sorted_paths)
 
     def _find_contradiction_clusters(self) -> List[Dict[str, Any]]:
         clusters = []
@@ -517,9 +593,14 @@ class GraphManager:
         return stalled
 
     def _has_supporting_evidence(self, hypo_id: str) -> bool:
-        for successor in self.causal_graph.successors(hypo_id):
-            edge_data = self.causal_graph.get_edge_data(hypo_id, successor)
-            if edge_data and edge_data.get("label") == "SUPPORTS":
+        for predecessor in self.causal_graph.predecessors(hypo_id):
+            edge_data = self.causal_graph.get_edge_data(predecessor, hypo_id)
+            if not edge_data:
+                continue
+            if edge_data.get("label") != "SUPPORTS":
+                continue
+            pred_data = self.causal_graph.nodes.get(predecessor, {})
+            if pred_data.get("node_type") == "Evidence":
                 return True
         return False
 
@@ -699,7 +780,8 @@ class GraphManager:
             node_data = dict(self.graph.nodes[node_id])
             self.graph.remove_node(node_id)
             logging.info("GraphManager.delete_node: removed node %s.", node_id)
-            schedule_coroutine(delete_node(self.op_id, node_id, 'task'))
+            if self.op_id:
+                schedule_coroutine(delete_node(self.op_id, node_id, 'task'))
             
             if node_data.get("type") == "execution_step":
                 parent_id = node_data.get("parent")
@@ -721,10 +803,20 @@ class GraphManager:
             raise ValueError(f"子任务 {subtask_id} 不存在于图中。")
 
         self._ensure_node_defaults(subtask_id)
-        self.graph.nodes[subtask_id]["staged_causal_nodes"].extend(proposed_nodes)
+        normalized_nodes: List[Dict] = []
+        for node_data in proposed_nodes:
+            if not isinstance(node_data, dict):
+                continue
+            normalized = dict(node_data)
+            source_step_id = normalized.get("source_step_id")
+            if isinstance(source_step_id, str) and source_step_id.strip():
+                normalized["source_step_id"] = self.resolve_source_step_id(source_step_id, subtask_id=subtask_id)
+            normalized_nodes.append(normalized)
+
+        self.graph.nodes[subtask_id]["staged_causal_nodes"].extend(normalized_nodes)
         self._sync_node(subtask_id, 'task')
 
-        for node_data in proposed_nodes:
+        for node_data in normalized_nodes:
             node_id = node_data.get("id")
             if not node_id:
                 continue
@@ -737,6 +829,7 @@ class GraphManager:
                 type="staged_causal",
                 node_type=node_data.get("node_type"),
                 is_staged_causal=True,
+                staged_owner_subtask_id=subtask_id,
                 source_step_id=node_data.get("source_step_id"),
                 description=node_data.get("description"),
                 title=node_data.get("title"),
@@ -756,17 +849,56 @@ class GraphManager:
                 self.graph.add_edge(source_step_id, node_id, type="produces", label="生成")
                 self._sync_edge(source_step_id, node_id, 'task')
 
+    def resolve_source_step_id(self, source_step_id: str, subtask_id: Optional[str] = None) -> str:
+        if not isinstance(source_step_id, str):
+            return source_step_id
+
+        normalized = source_step_id.strip()
+        if not normalized:
+            return source_step_id
+        if self.graph.has_node(normalized):
+            return normalized
+
+        if subtask_id:
+            prefixed = f"{subtask_id}_{normalized}"
+            if self.graph.has_node(prefixed):
+                return prefixed
+
+            if self.graph.has_node(subtask_id):
+                suffix = f"_{normalized}"
+                for step_id in self._collect_execution_steps(subtask_id):
+                    if step_id.endswith(suffix):
+                        return step_id
+
+        return normalized
+
     def clear_staged_causal_nodes(self, subtask_id: str):
         if not self.graph.has_node(subtask_id):
             logging.warning(f"GraphManager.clear_staged_causal_nodes: 子任务 {subtask_id} 不存在")
             return
 
-        staged_node_ids = [nid for nid, data in self.graph.nodes(data=True) if data.get("is_staged_causal") is True]
+        staged_node_ids: List[str] = []
+        staged_list = self.graph.nodes[subtask_id].get("staged_causal_nodes", []) or []
+        for node_data in staged_list:
+            if isinstance(node_data, dict):
+                node_id = node_data.get("id")
+                if isinstance(node_id, str) and node_id:
+                    staged_node_ids.append(node_id)
+
         removed_count = 0
         for node_id in staged_node_ids:
             try:
+                if not self.graph.has_node(node_id):
+                    continue
+                node_info = self.graph.nodes[node_id]
+                if node_info.get("is_staged_causal") is not True:
+                    continue
+                owner_subtask_id = node_info.get("staged_owner_subtask_id")
+                if owner_subtask_id and owner_subtask_id != subtask_id:
+                    continue
                 self.graph.remove_node(node_id)
-                schedule_coroutine(delete_node(self.op_id, node_id, 'task'))
+                if self.op_id:
+                    schedule_coroutine(delete_node(self.op_id, node_id, 'task'))
                 removed_count += 1
             except Exception as e:
                 logging.warning(f"删除暂存节点 {node_id} 失败: {e}")
@@ -1264,7 +1396,7 @@ class GraphManager:
         subtask_data["execution_summary_updated_at"] = time.time()
         return summary
 
-    def build_prompt_context(self, subtask_id: str) -> Dict[str, Any]:
+    def build_prompt_context(self, subtask_id: str, include_relevant_causal_context: bool = True) -> Dict[str, Any]:
         if not self.graph.has_node(subtask_id):
             raise NodeNotFoundError(f"子任务 {subtask_id} 不存在于图中。")
         self._ensure_node_defaults(subtask_id)
@@ -1315,10 +1447,13 @@ class GraphManager:
                     "execution_summary": dep_execution_summary,
                 })
         execution_summary = self._get_execution_summary(subtask_id)
-        causal_context = self.get_relevant_causal_context(subtask_id)
+        causal_context = {}
+        if include_relevant_causal_context:
+            causal_context = self.get_relevant_causal_context(subtask_id)
         current_key_facts = []
         for node_id, data in self.causal_graph.nodes(data=True):
-            if data.get("type") == "key_fact":
+            node_type = data.get("node_type", data.get("type"))
+            if node_type in {"key_fact", "KeyFact"}:
                 current_key_facts.append(data.get("description", ""))
         return {
             "task_id": self.task_id,
@@ -1411,14 +1546,20 @@ class GraphManager:
         return nx.descendants(self.graph, node_id)
 
     def is_goal_achieved(self) -> bool:
+        def _is_goal_node(node_data: Dict[str, Any]) -> bool:
+            if bool(node_data.get("is_goal_achieved")):
+                return True
+            status_value = str(node_data.get("status", "")).strip().lower()
+            return status_value == "goal_achieved"
+
         for node_id, data in self.graph.nodes(data=True):
-            if str(data.get("status", "")).upper() == "GOAL_ACHIEVED":
-                logging.debug(f"Goal achieved: Node {node_id} has status GOAL_ACHIEVED.")
+            if _is_goal_node(data):
+                logging.debug(f"Goal achieved: Node {node_id} flagged as goal achieved.")
                 return True
         
         for node_id, data in self.causal_graph.nodes(data=True):
-            if str(data.get("status", "")).upper() == "GOAL_ACHIEVED":
-                logging.debug(f"Goal achieved: Causal node {node_id} has status GOAL_ACHIEVED.")
+            if _is_goal_node(data):
+                logging.debug(f"Goal achieved: Causal node {node_id} flagged as goal achieved.")
                 return True
 
         return False

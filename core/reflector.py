@@ -81,7 +81,7 @@ class Reflector:
         status: str,
         execution_log: str,
         staged_causal_nodes: List[Dict],
-        full_graph_summary: str,
+        causal_graph_summary: str,
         completion_criteria: str,
         dependency_context: Optional[List[Dict]] = None,
         failure_patterns_summary: Dict[str, Any] = None,
@@ -96,7 +96,7 @@ class Reflector:
             status: 子任务执行状态
             execution_log: 执行日志
             staged_causal_nodes: 暂存的因果节点列表
-            full_graph_summary: 完整图摘要
+            causal_graph_summary: 因果图摘要
             completion_criteria: 完成标准
             dependency_context: 依赖上下文（可选）
             failure_patterns_summary: 失败模式摘要（可选）
@@ -114,7 +114,7 @@ class Reflector:
 
         # 构建context
         context = {
-            "causal_graph_summary": full_graph_summary or "因果链图谱为空。",
+            "causal_graph_summary": causal_graph_summary or "因果链图谱为空。",
             "dependency_context": dependency_context or [],
             "failure_patterns": failure_patterns_summary,
         }
@@ -520,7 +520,7 @@ class Reflector:
         execution_log: str,
         proposed_changes: List[Dict],
         staged_causal_nodes: List[Dict],
-        full_graph_summary: str,
+        causal_graph_summary: str,
         dependency_context: Optional[List[Dict]] = None,
         graph_manager=None,  # Add graph_manager to access causal graph analysis
         reflector_context=None,  # 新增：Reflector上下文对象
@@ -542,7 +542,7 @@ class Reflector:
             execution_log: 执行日志
             proposed_changes: 提议的变更列表
             staged_causal_nodes: 暂存的因果节点列表
-            full_graph_summary: 完整图摘要
+            causal_graph_summary: 因果图摘要
             long_mem: 长期记忆对象（可选）
             dependency_context: 依赖上下文（可选）
             graph_manager: 图管理器实例（可选）
@@ -564,7 +564,7 @@ class Reflector:
             status,
             execution_log,
             staged_causal_nodes,
-            full_graph_summary,
+            causal_graph_summary,
             completion_criteria,
             dependency_context,
             failure_patterns_summary,

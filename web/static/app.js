@@ -2084,6 +2084,8 @@ function renderSystemEvent(msg) {
         state.missionAccomplished = true;
         showSuccessBanner(); // [Fix] Update UI to show success banner
         loadOps(); // Refresh the task list on mission accomplished
+        state.userHasInteracted = false;
+        render(true);
       }
     } else if (data.reason === 'confidence_update') {
       html += `<div style="color:#fbbf24;font-weight:bold;">📈 Confidence Update</div>`;
@@ -2160,7 +2162,8 @@ function renderLLMResponse(msg, isHistory = false) {
   if (missionFlag && !state.missionAccomplished) {
     state.missionAccomplished = true;
     showSuccessBanner();
-    render();
+    state.userHasInteracted = false;
+    render(true);
   }
 
   // 2. 解析内容

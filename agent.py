@@ -516,7 +516,8 @@ def validate_causal_graph_updates(
 
 def process_causal_graph_commands(
     updates: Dict[str, List[Dict]],
-    graph_manager: GraphManager
+    graph_manager: GraphManager,
+    subtask_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     处理因果图谱的结构化更新. 
@@ -538,6 +539,13 @@ def process_causal_graph_commands(
     # 1. 首先处理所有节点添加
     for node_data in nodes_to_add:
         temp_id = node_data.get("id")
+        if subtask_id and isinstance(node_data, dict):
+            source_step_id = node_data.get("source_step_id")
+            if isinstance(source_step_id, str) and source_step_id.strip():
+                node_data = dict(node_data)
+                node_data["source_step_id"] = graph_manager.resolve_source_step_id(
+                    source_step_id, subtask_id=subtask_id
+                )
         if temp_id:
             # The add_causal_node method creates a deterministic ID
             permanent_id = graph_manager.add_causal_node(node_data)
@@ -1420,12 +1428,11 @@ async def main():
 
                 refreshed_summary = graph_manager.get_full_graph_summary(detail_level=1)
                 causal_graph_summary = graph_manager.get_causal_graph_summary()
-                attack_path_summary = graph_manager.get_attack_path_summary()
                 failure_patterns_summary = graph_manager.analyze_failure_patterns()
 
                 plan_data, call_metrics = await planner.dynamic_plan(
                     goal, refreshed_summary, intelligence_summary,
-                    causal_graph_summary, attack_path_summary, failure_patterns_summary, graph_manager,
+                    causal_graph_summary, "", failure_patterns_summary, graph_manager,
                     planner_context=planner_context
                 )
                 # Output planner's dynamic plan results
@@ -1703,8 +1710,10 @@ async def main():
                         execution_log=graph_manager.get_subtask_execution_log(subtask_id),
                         proposed_changes=subtask_data.get('proposed_changes', []),
                         staged_causal_nodes=subtask_data.get('staged_causal_nodes', []),
-                        full_graph_summary=graph_manager.get_full_graph_summary(detail_level=1),
-                        dependency_context=graph_manager.build_prompt_context(subtask_id).get("dependencies", []),
+                        causal_graph_summary=graph_manager.get_causal_graph_summary(),
+                        dependency_context=graph_manager.build_prompt_context(
+                            subtask_id, include_relevant_causal_context=False
+                        ).get("dependencies", []),
                         graph_manager=graph_manager,
                         reflector_context=reflector_context
                     )
@@ -1748,7 +1757,7 @@ async def main():
                     if causal_graph_updates:
                         validated_updates = validate_causal_graph_updates(causal_graph_updates,
                                                                           graph_manager, subtask_id=subtask_id)
-                        process_causal_graph_commands(validated_updates, graph_manager)
+                        process_causal_graph_commands(validated_updates, graph_manager, subtask_id=subtask_id)
                         # Added causal graph print for simple mode requirement
                         if effective_output_mode in ["simple", "default", "debug"]:
                             try:

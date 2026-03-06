@@ -409,7 +409,9 @@ async def _build_executor_prompt(
         tuple: (system_prompt, updated_messages)
     """
     subtask_data = graph_manager.graph.nodes[subtask_id]
-    prompt_context = graph_manager.build_prompt_context(subtask_id)
+    prompt_context = graph_manager.build_prompt_context(
+        subtask_id, include_relevant_causal_context=False
+    )
 
     manager = PromptManager()
     subtask = {

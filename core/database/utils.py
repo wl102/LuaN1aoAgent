@@ -36,6 +36,28 @@ AsyncSessionLocal = async_sessionmaker(
     class_=AsyncSession
 )
 
+
+def _extract_node_updated_at(node_data: Dict[str, Any]) -> Optional[float]:
+    if not isinstance(node_data, dict):
+        return None
+    raw = node_data.get("updated_at")
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            try:
+                return datetime.fromisoformat(text).timestamp()
+            except ValueError:
+                return None
+    return None
+
 async def init_db():
     """Initialize the database by creating all tables."""
     async with engine.begin() as conn:
@@ -124,10 +146,17 @@ async def upsert_node(session_id: str, node_id: str, graph_type: str, node_data:
         if existing_records:
             # Update the first record found
             target_record = existing_records[0]
-            target_record.type = n_type
-            target_record.status = status
-            target_record.data = node_data
-            target_record.updated_at = datetime.now()
+            existing_ts = _extract_node_updated_at(target_record.data or {})
+            incoming_ts = _extract_node_updated_at(node_data)
+            should_apply = True
+            if incoming_ts is not None and existing_ts is not None and incoming_ts < existing_ts:
+                should_apply = False
+
+            if should_apply:
+                target_record.type = n_type
+                target_record.status = status
+                target_record.data = node_data
+                target_record.updated_at = datetime.now()
             
             # If there are duplicates, delete them to clean up the DB
             if len(existing_records) > 1:
@@ -248,10 +277,16 @@ async def atomic_upsert_graph_data(
                 if existing_records:
                     # 更新第一条记录
                     target_record = existing_records[0]
-                    target_record.type = n_type
-                    target_record.status = status
-                    target_record.data = node_data
-                    target_record.updated_at = datetime.now()
+                    existing_ts = _extract_node_updated_at(target_record.data or {})
+                    incoming_ts = _extract_node_updated_at(node_data)
+                    should_apply = True
+                    if incoming_ts is not None and existing_ts is not None and incoming_ts < existing_ts:
+                        should_apply = False
+                    if should_apply:
+                        target_record.type = n_type
+                        target_record.status = status
+                        target_record.data = node_data
+                        target_record.updated_at = datetime.now()
                     
                     # 删除重复记录
                     if len(existing_records) > 1:
