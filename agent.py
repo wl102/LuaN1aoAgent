@@ -348,7 +348,8 @@ def process_graph_commands(operations: List[Dict], graph_manager: GraphManager) 
             node_data.get('priority', 1),
             reason=node_data.get('reason', ''),
             completion_criteria=node_data.get('completion_criteria', ''),
-            mission_briefing=node_data.get('mission_briefing')
+            mission_briefing=node_data.get('mission_briefing'),
+            max_steps=node_data.get('max_steps'),
         )
 
     # ADD_NODE 完成后校验 DAG 完整性：检测环形依赖
@@ -1713,9 +1714,10 @@ async def main():
 
             tasks = [
                 asyncio.create_task(run_executor_cycle(goal, subtask_id, llm, graph_manager,
-                    global_mission_briefing, log_dir=log_dir, 
+                    global_mission_briefing, log_dir=log_dir,
                     save_callback=per_realtime_save,
-                    output_mode=effective_output_mode)) # Added output_mode
+                    output_mode=effective_output_mode,
+                    max_steps=graph_manager.graph.nodes[subtask_id].get('max_steps')))
                 for subtask_id in subtask_batch
             ]
             completed_results = await asyncio.gather(*tasks, return_exceptions=True)

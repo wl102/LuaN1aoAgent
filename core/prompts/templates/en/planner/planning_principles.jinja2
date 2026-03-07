@@ -22,6 +22,7 @@
 - **Value-Driven**: Dynamically adjust priorities based on functional importance and exploitation probability.
 - **Convergence Strategy**: Once a high-value vulnerability is found (e.g., SQLi, RCE), immediately converge resources for deep exploitation, suspending unrelated exploration.
 - **Environmental Adaptation**: When encountering WAF/rate limiting, plan bypass strategies (proxies, encoding, rate adjustment).
+- **Adaptive Step Count (`max_steps`)**: The system default is {{ executor_max_steps }} steps per subtask (controlled by the `EXECUTOR_MAX_STEPS` environment variable). For complex tasks requiring more than {{ executor_max_steps }} steps (e.g., blind SQL injection data extraction, broad directory scanning, multi-stage authentication bypass), set the `max_steps` field (integer, recommended range 1.5–2.5× the default) in `node_data` to extend the execution limit. Simple verification or reconnaissance tasks do not need this field (use `null`).
 
 ### 4. Logic Reverse-Engineering & Business First
 - **Business Understanding**: Prioritize understanding core business logic (authentication, payment, uploads) over blind scanning.

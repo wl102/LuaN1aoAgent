@@ -67,6 +67,10 @@ class GraphManager:
         self._attack_paths_cache: List[Dict[str, Any]] = []
         self._attack_paths_cache_version = -1
         self.op_id = op_id  # This is the session_id in DB
+
+        # P1-2: 并行任务共享公告板 — append-only list，CPython GIL 保证单次 append 的原子性
+        self.shared_findings: List[Dict] = []
+        self._shared_findings_read_cursors: Dict[str, int] = {}  # subtask_id -> 已读条数
         
         # Initialize session in DB if op_id is provided
         if self.op_id:
@@ -726,14 +730,14 @@ class GraphManager:
 
         return context
 
-    def add_subtask_node(self, subtask_id: str, description: str, dependencies: List[str], priority: int = 1, reason: str = "", completion_criteria: str = "", mission_briefing: Optional[Dict] = None):
+    def add_subtask_node(self, subtask_id: str, description: str, dependencies: List[str], priority: int = 1, reason: str = "", completion_criteria: str = "", mission_briefing: Optional[Dict] = None, max_steps: Optional[int] = None):
         if self.graph.has_node(subtask_id):
             logging.warning("GraphManager.add_subtask_node: node %s already exists, skip.", subtask_id)
             return
 
         self.graph.add_node(
             subtask_id,
-            **self._build_subtask_payload(description, priority, reason, completion_criteria, mission_briefing),
+            **self._build_subtask_payload(description, priority, reason, completion_criteria, mission_briefing, max_steps),
         )
         self._ensure_node_defaults(subtask_id)
         self._sync_node(subtask_id, 'task')
@@ -812,24 +816,50 @@ class GraphManager:
 
         self._ensure_node_defaults(subtask_id)
 
-        # 上限保护：防止 staged_causal_nodes 无界增长导致 Reflector 提示词膨胀
+        # P3-2: 产物分级存储 — 高优先级节点（ConfirmedVulnerability/KeyFact）不被淘汰，低优先级节点可被裁剪
         MAX_STAGED_NODES = 30
+        HIGH_PRIORITY_TYPES = {"ConfirmedVulnerability", "KeyFact"}
+
         current_staged = self.graph.nodes[subtask_id].get("staged_causal_nodes", [])
-        remaining_capacity = MAX_STAGED_NODES - len(current_staged)
-        if remaining_capacity <= 0:
+        high_priority_count = sum(1 for n in current_staged if n.get("node_type") in HIGH_PRIORITY_TYPES)
+        # 可淘汰槽位 = 总上限 - 已有高优先级节点
+        evictable_capacity = MAX_STAGED_NODES - high_priority_count
+        evictable_count = len(current_staged) - high_priority_count
+
+        # 分离新提交节点为高/低优先级
+        new_high = [n for n in proposed_nodes if isinstance(n, dict) and n.get("node_type") in HIGH_PRIORITY_TYPES]
+        new_low = [n for n in proposed_nodes if isinstance(n, dict) and n.get("node_type") not in HIGH_PRIORITY_TYPES]
+
+        # 高优先级节点：只要总上限未满就接受（忽略低优先级占用的槽位）
+        high_remaining = MAX_STAGED_NODES - len(current_staged)
+        if high_remaining < len(new_high):
+            # 总上限不足：尝试淘汰最旧的低优先级节点为高优先级腾位
+            evict_needed = len(new_high) - high_remaining
+            evictable_indices = [i for i, n in enumerate(current_staged) if n.get("node_type") not in HIGH_PRIORITY_TYPES]
+            to_evict = evictable_indices[:evict_needed]
+            if to_evict:
+                for idx in sorted(to_evict, reverse=True):
+                    current_staged.pop(idx)
+                logging.info(
+                    "GraphManager: 为高优先级节点腾出 %d 个槽位（淘汰低优先级旧节点），子任务 %s",
+                    len(to_evict), subtask_id
+                )
+
+        # 低优先级节点：受剩余可淘汰槽位限制
+        remaining_total = MAX_STAGED_NODES - len(current_staged) - len(new_high)
+        if remaining_total < 0:
+            remaining_total = 0
+        if len(new_low) > remaining_total:
             logging.warning(
-                "GraphManager.stage_proposed_causal_nodes: 子任务 %s 的 staged_causal_nodes "
-                "已达上限 (%d)，忽略新提交的 %d 个节点。",
-                subtask_id, MAX_STAGED_NODES, len(proposed_nodes)
+                "GraphManager.stage_proposed_causal_nodes: 子任务 %s 低优先级节点超出槽位，"
+                "仅接受 %d/%d 个。",
+                subtask_id, remaining_total, len(new_low)
             )
+            new_low = new_low[:remaining_total]
+
+        proposed_nodes = new_high + new_low
+        if not proposed_nodes:
             return
-        if len(proposed_nodes) > remaining_capacity:
-            logging.warning(
-                "GraphManager.stage_proposed_causal_nodes: 子任务 %s 提交 %d 个节点，"
-                "仅接受前 %d 个（上限 %d）。",
-                subtask_id, len(proposed_nodes), remaining_capacity, MAX_STAGED_NODES
-            )
-            proposed_nodes = proposed_nodes[:remaining_capacity]
 
         normalized_nodes: List[Dict] = []
         for node_data in proposed_nodes:
@@ -843,6 +873,29 @@ class GraphManager:
 
         self.graph.nodes[subtask_id]["staged_causal_nodes"].extend(normalized_nodes)
         self._sync_node(subtask_id, 'task')
+
+        # P1-2: 高价值暂存节点写入共享公告板（并行子任务实时共享线索，未经 Reflector 审核）
+        # 准入标准：
+        #   - ConfirmedVulnerability：无条件广播（Executor 已判定为确认漏洞）
+        #   - KeyFact：仅置信度 >= 0.7 才广播（低置信 KeyFact 对其他任务无行动价值）
+        #   - Hypothesis 及其他：不广播（推测性信息，只在子任务内部使用）
+        BULLETIN_UNCONDITIONAL = {"ConfirmedVulnerability"}
+        BULLETIN_CONDITIONAL   = {"KeyFact"}
+        BULLETIN_KEYFACT_MIN_CONFIDENCE = 0.5
+
+        for node_data in normalized_nodes:
+            node_type = node_data.get("node_type", "")
+            confidence = float(node_data.get("confidence") or 0.0)
+            if node_type in BULLETIN_UNCONDITIONAL or (
+                node_type in BULLETIN_CONDITIONAL and confidence >= BULLETIN_KEYFACT_MIN_CONFIDENCE
+            ):
+                self.post_shared_finding(
+                    subtask_id=subtask_id,
+                    node_type=node_type,
+                    title=node_data.get("title", node_data.get("id", "")),
+                    description=node_data.get("description", ""),
+                    confidence=confidence,
+                )
 
         for node_data in normalized_nodes:
             node_id = node_data.get("id")
@@ -876,6 +929,28 @@ class GraphManager:
             if source_step_id and self.graph.has_node(source_step_id):
                 self.graph.add_edge(source_step_id, node_id, type="produces", label="生成")
                 self._sync_edge(source_step_id, node_id, 'task')
+
+    def post_shared_finding(self, subtask_id: str, node_type: str, title: str, description: str, confidence: float = 0.0):
+        """P1-2: 向共享公告板写入一条发现。由 Executor 在 stage_proposed_causal_nodes 时调用。"""
+        entry = {
+            "from_subtask": subtask_id,
+            "node_type": node_type,
+            "title": title,
+            "description": description,
+            "confidence": confidence,
+            "timestamp": time.time(),
+        }
+        self.shared_findings.append(entry)
+
+    def get_new_shared_findings(self, subtask_id: str) -> List[Dict]:
+        """P1-2: 返回自上次读取以来其他子任务新增的共享发现（排除自身来源）。更新游标。"""
+        cursor = self._shared_findings_read_cursors.get(subtask_id, 0)
+        new_entries = [
+            e for e in self.shared_findings[cursor:]
+            if e.get("from_subtask") != subtask_id
+        ]
+        self._shared_findings_read_cursors[subtask_id] = len(self.shared_findings)
+        return new_entries
 
     def resolve_source_step_id(self, source_step_id: str, subtask_id: Optional[str] = None) -> str:
         if not isinstance(source_step_id, str):
@@ -1212,7 +1287,7 @@ class GraphManager:
                 edges_tree.add(edge_label)
         console.print(tree)
 
-    def _build_subtask_payload(self, description: str, priority: int, reason: str, completion_criteria: str, mission_briefing: Optional[Dict]) -> Dict[str, Any]:
+    def _build_subtask_payload(self, description: str, priority: int, reason: str, completion_criteria: str, mission_briefing: Optional[Dict], max_steps: Optional[int] = None) -> Dict[str, Any]:
         return {
             "type": "subtask",
             "description": description,
@@ -1233,6 +1308,7 @@ class GraphManager:
             "execution_summary_updated_at": None,
             "conversation_history": [],
             "turn_counter": 0,
+            "max_steps": max_steps,
         }
 
     def get_subtask_conversation_history(self, subtask_id: str) -> List[Dict[str, Any]]:

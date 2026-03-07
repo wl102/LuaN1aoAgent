@@ -69,6 +69,14 @@
 {{ failure_patterns }}
 {% endif %}
 
+{% if active_hypotheses %}
+### 💡 当前活跃假设 (Active Hypotheses — 跨步持久化)
+以下假设由本轮任务早期调用 `formulate_hypotheses` 生成，经压缩后仍然有效。请在制定下一步行动时优先考量高置信度假设，并对已被证伪的假设调用 `reflect_on_failure` 或 `formulate_hypotheses` 更新。
+{% for h in active_hypotheses %}
+- **[置信度 {{ h.confidence }}]** {{ h.description }}
+{% endfor %}
+{% endif %}
+
 {{ tools_section }}
 </context_input>
 

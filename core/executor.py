@@ -36,6 +36,7 @@ from conf.config import (
     EXECUTOR_COMPRESS_INTERVAL_MSG_THRESHOLD,
     EXECUTOR_TOOL_TIMEOUT,
     EXECUTOR_MAX_OUTPUT_LENGTH,
+    TOOL_TIMEOUTS,
 )
 
 
@@ -424,6 +425,7 @@ async def _build_executor_prompt(
         "dependencies": prompt_context.get("dependencies", []) if prompt_context else [],
         "causal_graph_summary": prompt_context.get("causal_graph_summary", "因果链图谱为空。") if prompt_context else "因果链图谱为空。",
         "key_facts": prompt_context.get("key_facts", []) if prompt_context else [],
+        "active_hypotheses": subtask_data.get("active_hypotheses") or [],
     }
     system_prompt = manager.build_executor_prompt(
         main_goal=main_goal, subtask=subtask, context=context, global_mission_briefing=global_mission_briefing
@@ -435,6 +437,52 @@ async def _build_executor_prompt(
         messages[0] = {"role": "system", "content": system_prompt}
 
     return system_prompt, messages
+
+
+# ── P3-1: 本地工具处理 ─────────────────────────────────────────────────────────
+
+_LOCAL_TOOLS = {"query_causal_graph"}
+
+
+async def _handle_local_tool(tool_name: str, tool_params: dict, graph_manager: GraphManager) -> str:
+    """处理不经过 MCP 的本地工具调用。当前支持：query_causal_graph。"""
+    if tool_name == "query_causal_graph":
+        node_type_filter: str = tool_params.get("node_type", "")
+        query: str = tool_params.get("query", "")
+        limit: int = int(tool_params.get("limit", 10))
+
+        results = []
+        for node_id, data in graph_manager.causal_graph.nodes(data=True):
+            nt = data.get("node_type", "")
+            if node_type_filter and nt != node_type_filter:
+                continue
+            text = " ".join(filter(None, [
+                data.get("title", ""), data.get("description", ""),
+                data.get("vulnerability", ""), data.get("hypothesis", ""),
+            ])).lower()
+            if query and query.lower() not in text:
+                continue
+            results.append({
+                "id": node_id,
+                "node_type": nt,
+                "title": data.get("title", ""),
+                "description": data.get("description", ""),
+                "confidence": data.get("confidence"),
+                "status": data.get("status"),
+                "evidence": data.get("evidence"),
+                "vulnerability": data.get("vulnerability"),
+            })
+            if len(results) >= limit:
+                break
+
+        return json.dumps({
+            "success": True,
+            "count": len(results),
+            "results": results,
+            "note": f"查询参数: node_type={node_type_filter!r}, query={query!r}, limit={limit}",
+        }, ensure_ascii=False, indent=2)
+
+    return json.dumps({"success": False, "error": f"未知本地工具: {tool_name}"}, ensure_ascii=False)
 
 
 async def run_executor_cycle(
@@ -522,6 +570,39 @@ async def run_executor_cycle(
         _get_console().print(
             Panel(t("subtask_step", subtask_id=subtask_id, step=executed_steps_count + 1), title_align="left", style="green")
         )
+
+        # P1-2: 并行任务共享公告板 — 读取其他并行子任务新增的高价值发现并注入 prompt
+        if executed_steps_count > 0:
+            new_findings = graph_manager.get_new_shared_findings(subtask_id)
+            if new_findings:
+                bulletin_lines = []
+                for f in new_findings:
+                    bulletin_lines.append(
+                        f"  - [{f['node_type']}] 来自子任务 {f['from_subtask']}: **{f['title']}** — {f['description'][:120]}"
+                    )
+                bulletin_msg = (
+                    f"📢 [共享公告板] 其他并行子任务新增了 {len(new_findings)} 条线索（暂存状态，尚未经 Reflector 审核，请作为参考而非已确认事实）：\n"
+                    + "\n".join(bulletin_lines)
+                )
+                messages.append({"role": "user", "content": bulletin_msg})
+                _get_console().print(f"📢 [共享公告板] 向子任务 {subtask_id} 注入 {len(new_findings)} 条跨任务发现", style="dim cyan")
+
+        # P1-3: 首步假设制定软性提示 — 仅在第 0 步且因果图无明确 ConfirmedVulnerability 时提示
+        if executed_steps_count == 0:
+            has_confirmed_vuln = any(
+                d.get("node_type") == "ConfirmedVulnerability"
+                for _, d in graph_manager.causal_graph.nodes(data=True)
+            )
+            if not has_confirmed_vuln:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "💡 [建议] 这是你的第一步。当前因果图中尚无 ConfirmedVulnerability 节点。"
+                        "建议优先调用 `formulate_hypotheses` 来明确你的攻击假设和测试路径，"
+                        "这将使后续步骤更有目的性。如果你已有明确的行动计划，可以直接执行。"
+                    ),
+                })
+                _get_console().print(f"💡 [P1-3] 首步假设提示已注入子任务 {subtask_id}", style="dim cyan")
 
         # 构建提示词
         system_prompt, messages = await _build_executor_prompt(graph_manager, subtask_id, main_goal, global_mission_briefing, messages)
@@ -687,8 +768,10 @@ async def run_executor_cycle(
             
             execution_tasks.append(
                 asyncio.wait_for(
-                    _execute_with_retry(call_mcp_tool_async, tool_name, tool_params), 
-                    timeout=EXECUTOR_TOOL_TIMEOUT
+                    _handle_local_tool(tool_name, tool_params, graph_manager)
+                    if tool_name in _LOCAL_TOOLS
+                    else _execute_with_retry(call_mcp_tool_async, tool_name, tool_params),
+                    timeout=TOOL_TIMEOUTS.get(tool_name, EXECUTOR_TOOL_TIMEOUT)
                 )
             )
 
@@ -781,6 +864,20 @@ async def run_executor_cycle(
                         "status": step_status,
                     },
                 )
+
+                # P1-1: 假设跨步持久化 — 将 formulate_hypotheses 输出写入子任务节点
+                if tool_name == "formulate_hypotheses" and step_status == "completed":
+                    try:
+                        hyp_result = json.loads(result_str)
+                        new_hypotheses = hyp_result.get("hypotheses_record", {}).get("hypotheses", [])
+                        if new_hypotheses:
+                            graph_manager.update_node(subtask_id, {"active_hypotheses": new_hypotheses})
+                            _get_console().print(
+                                f"💡 [假设持久化] 已将 {len(new_hypotheses)} 条假设写入节点 {subtask_id}",
+                                style="dim cyan",
+                            )
+                    except Exception:
+                        pass
                 
                 try:
                     run_log_entry = {

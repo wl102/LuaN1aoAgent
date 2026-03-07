@@ -80,11 +80,21 @@
   - **图操作驱动**：输出结构化的图编辑指令而非自然语言
   - **并行调度**：基于拓扑依赖自动识别可并行执行的任务
 
+- **🧠 Planner (规划器)**
+  - **战略层大脑**：基于全局图谱进行动态规划
+  - **自适应能力**：识别死胡同，自动生成备选路径
+  - **图操作驱动**：输出结构化的图编辑指令而非自然语言
+  - **并行调度**：基于拓扑依赖自动识别可并行执行的任务
+  - **自适应步数**：为复杂子任务（盲注提取、多阶段绕过等）单独分配更多执行步数
+
 - **⚙️ Executor (执行器)**
   - **战术层执行**：专注于单一子任务的工具调用和结果分析
   - **工具编排**：通过 MCP (Model Context Protocol) 统一调度安全工具
   - **上下文压缩**：智能管理消息历史，避免 token 溢出
   - **容错重试**：自动处理网络瞬时错误和工具调用失败
+  - **假设持久化**：`formulate_hypotheses` 生成的假设跨步骤保留，不因上下文压缩丢失
+  - **并行发现共享**：并行执行的子任务通过共享公告板实时交换高价值发现（ConfirmedVulnerability 及高置信 KeyFact）
+  - **首步引导**：无已知漏洞时，自动提示先制定假设框架，减少盲目试探
 
 - **⚖️ Reflector (反思器)**
   - **审计分析**：复盘任务执行，验证产出物有效性
@@ -161,8 +171,9 @@ Exploit: mysql -h target -u root -p [爆破/空密码]
 - **HTTP/HTTPS 请求**：支持自定义 Headers、代理、超时控制
 - **Shell 命令执行**：安全封装的系统命令调用（建议容器化运行）
 - **Python 代码执行**：动态执行 Python 脚本用于复杂逻辑处理
-- **元认知工具**：`think`（深度思考）、`hypothesize`（假设生成）、`reflect`（经验总结）
+- **元认知工具**：`think`（深度思考）、`formulate_hypotheses`（假设生成）、`reflect_on_failure`（失败反思）
 - **任务控制**：`halt_task`（提前终止任务）
+- **本地图谱查询**：`query_causal_graph`（直接查询因果图节点，无 MCP 延迟）
 
 > 💡 **扩展性**：可通过 `mcp.json` 轻松集成新工具（如 Metasploit、Nuclei、Burp Suite API）
 
@@ -378,6 +389,8 @@ logs/demo_test/20250204_120000/
 │  │ • 状态追踪与更新                                 │     │
 │  │ • 拓扑排序与依赖解析                             │     │
 │  │ • 并行任务调度                                   │     │
+│  │ • 共享公告板 (shared_findings)                  │     │
+│  │ • 因果图谱 (causal_graph) 分级存储              │     │
 │  └────────────────────────────────────────────────┘     │
 │  ┌────────────────────────────────────────────────┐     │
 │  │ 数据库层 (SQLite)                               │     │
@@ -399,8 +412,9 @@ logs/demo_test/20250204_120000/
 │  │ • FAISS 向量检索   │  │ • http_request           │   │
 │  │ • 知识文档解析     │  │ • shell_exec             │   │
 │  │ • 相似度搜索       │  │ • python_exec            │   │
-│  │                    │  │ • think/hypothesize      │   │
+│  │                    │  │ • think/formulate_hyp.   │   │
 │  └────────────────────┘  │ • halt_task              │   │
+│                          │ • query_causal_graph(本地)│  │
 │                          └──────────────────────────┘   │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -516,9 +530,7 @@ LuaN1aoAgent/
 
 ## 👥 贡献者 (Contributors)
 
-<a href="https://github.com/SanMuzZzZz/LuaN1aoAgent/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=SanMuzZzZz/LuaN1aoAgent" alt="Contributors" />
-</a>
+[![Contributors](https://contrib.rocks/image?repo=SanMuzZzZz/LuaN1aoAgent)](https://github.com/SanMuzZzZz/LuaN1aoAgent/graphs/contributors)
 
 ---
 

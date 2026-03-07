@@ -78,12 +78,16 @@ LuaN1ao decouples penetration testing thinking into three independent yet collab
   - **Adaptive Capability**: Identify dead ends and automatically generate alternative paths
   - **Graph Operation Driven**: Output structured graph editing instructions rather than natural language
   - **Parallel Scheduling**: Automatically identify parallelizable tasks based on topological dependencies
+  - **Adaptive Step Count**: Allocate extra execution steps (`max_steps`) per subtask for complex tasks (blind injection extraction, multi-stage bypass, etc.)
 
 - **⚙️ Executor**
   - **Tactical Execution**: Focus on single sub-task tool invocation and result analysis
   - **Tool Orchestration**: Unified scheduling of security tools via MCP (Model Context Protocol)
   - **Context Compression**: Intelligent message history management to avoid token overflow
   - **Fault Tolerance**: Automatic handling of network transient errors and tool invocation failures
+  - **Hypothesis Persistence**: Hypotheses from `formulate_hypotheses` are preserved across steps and survive context compression
+  - **Parallel Discovery Sharing**: Parallel subtasks exchange high-value findings in real-time via a shared bulletin board (ConfirmedVulnerability and high-confidence KeyFact)
+  - **First-Step Guidance**: When no confirmed vulnerabilities exist, automatically prompts the agent to formulate a hypothesis framework before blind exploration
 
 - **⚖️ Reflector**
   - **Audit Analysis**: Review task execution and validate artifact effectiveness
@@ -160,8 +164,9 @@ LuaN1ao achieves unified integration and scheduling of tools through the **Model
 - **HTTP/HTTPS Requests**: Support for custom headers, proxies, timeout control
 - **Shell Command Execution**: Securely encapsulated system command invocation (containerized execution recommended)
 - **Python Code Execution**: Dynamic execution of Python scripts for complex logic processing
-- **Metacognitive Tools**: `think` (deep thinking), `hypothesize` (hypothesis generation), `reflect` (experience summarization)
+- **Metacognitive Tools**: `think` (deep thinking), `formulate_hypotheses` (hypothesis generation), `reflect_on_failure` (failure reflection)
 - **Task Control**: `halt_task` (early task termination)
+- **Local Graph Query**: `query_causal_graph` (direct in-process causal graph lookup, zero MCP latency)
 
 > 💡 **Extensibility**: New tools can be easily integrated via `mcp.json` (e.g., Metasploit, Nuclei, Burp Suite API)
 
@@ -377,6 +382,8 @@ logs/demo_test/20250204_120000/
 │  │ • State Tracking and Updates                   │     │
 │  │ • Topological Sorting and Dependency Resolution│     │
 │  │ • Parallel Task Scheduling                     │     │
+│  │ • Shared Bulletin Board (shared_findings)      │     │
+│  │ • Causal Graph Tiered Storage                  │     │
 │  └────────────────────────────────────────────────┘     │
 │  ┌────────────────────────────────────────────────┐     │
 │  │ Database Layer (SQLite)                        │     │
@@ -398,8 +405,9 @@ logs/demo_test/20250204_120000/
 │  │ • FAISS Vector Retrieval│ • http_request           │   │
 │  │ • Knowledge Document Parsing│ • shell_exec             │   │
 │  │ • Similarity Search │ • python_exec            │   │
-│  │                    │ • think/hypothesize      │   │
+│  │                    │  • think/formulate_hyp.  │   │
 │  └────────────────────┘  │ • halt_task              │   │
+│                          │ • query_causal_graph(local)│ │
 │                          └──────────────────────────┘   │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -509,15 +517,13 @@ By downloading, installing, or using LuaN1ao, you expressly acknowledge and agre
 - **Strictly Authorized Use**: You must obtain explicit written consent from system owners before testing. Unauthorized access is illegal and prohibited.
 - **No Warranties**: This software is provided "AS IS", without warranty of any kind.
 - **Assumption of Risk**: The tool contains high-privilege execution capabilities (`shell_exec`, `python_exec`). Running it in an isolated environment (like Docker or a VM) is strongly recommended. Do not use it in production environments.
-- **Limitation of Liability**: The developers and contributors are not responsible for any damage, data loss, or legal consequences resulting from the use or misuse of this tool. You assume full responsibility for your actions. 
+- **Limitation of Liability**: The developers and contributors are not responsible for any damage, data loss, or legal consequences resulting from the use or misuse of this tool. You assume full responsibility for your actions.
 
 **If you do not agree to these terms, do not use this software.**
 
 ## 👥 Contributors
 
-<a href="https://github.com/SanMuzZzZz/LuaN1aoAgent/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=SanMuzZzZz/LuaN1aoAgent" alt="Contributors" />
-</a>
+[![Contributors](https://contrib.rocks/image?repo=SanMuzZzZz/LuaN1aoAgent)](https://github.com/SanMuzZzZz/LuaN1aoAgent/graphs/contributors)
 
 ---
 

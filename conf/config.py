@@ -166,6 +166,29 @@ EXECUTOR_COMPRESS_INTERVAL_MSG_THRESHOLD = int(os.getenv("EXECUTOR_COMPRESS_INTE
 # 工具调用超时时间（秒）
 EXECUTOR_TOOL_TIMEOUT = int(os.getenv("EXECUTOR_TOOL_TIMEOUT", "120"))
 
+# 各工具独立超时映射（秒）。未列出的工具使用 EXECUTOR_TOOL_TIMEOUT 默认值。
+# 重型扫描工具需要更长超时；轻量思考/检索工具应快速返回。
+TOOL_TIMEOUTS: dict = {
+    # 重型扫描工具
+    "sqlmap_tool":       int(os.getenv("TOOL_TIMEOUT_SQLMAP",    "600")),
+    "nuclei_scan":       int(os.getenv("TOOL_TIMEOUT_NUCLEI",    "300")),
+    "dirsearch_scan":    int(os.getenv("TOOL_TIMEOUT_DIRSEARCH", "300")),
+    "concurrency_test":  int(os.getenv("TOOL_TIMEOUT_CONCURRENCY", "180")),
+    # 标准工具
+    "http_request":      int(os.getenv("TOOL_TIMEOUT_HTTP",       "60")),
+    "shell_exec":        int(os.getenv("TOOL_TIMEOUT_SHELL",      "120")),
+    "python_exec":       int(os.getenv("TOOL_TIMEOUT_PYTHON",     "60")),
+    "web_search":        int(os.getenv("TOOL_TIMEOUT_WEB_SEARCH", "30")),
+    "search_exploit":    int(os.getenv("TOOL_TIMEOUT_SEARCH_EXPLOIT", "30")),
+    # 轻量工具
+    "think":                  int(os.getenv("TOOL_TIMEOUT_THINK",        "30")),
+    "formulate_hypotheses":   int(os.getenv("TOOL_TIMEOUT_HYPOTHESES",   "30")),
+    "reflect_on_failure":     int(os.getenv("TOOL_TIMEOUT_REFLECT",      "30")),
+    "expert_analysis":        int(os.getenv("TOOL_TIMEOUT_EXPERT",       "60")),
+    "retrieve_knowledge":     int(os.getenv("TOOL_TIMEOUT_RETRIEVE",     "15")),
+    "distill_knowledge":      int(os.getenv("TOOL_TIMEOUT_DISTILL",      "20")),
+}
+
 # 执行器观察结果的最大长度（字符），超过此长度将被截断
 EXECUTOR_MAX_OUTPUT_LENGTH = int(os.getenv("EXECUTOR_MAX_OUTPUT_LENGTH", "50000"))
 

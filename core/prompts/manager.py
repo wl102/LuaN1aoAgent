@@ -16,7 +16,7 @@ from core.prompts.renderers import (
 )
 
 
-from conf.config import SCENARIO_MODE, PROMPT_LANGUAGE
+from conf.config import SCENARIO_MODE, PROMPT_LANGUAGE, EXECUTOR_MAX_STEPS
 
 class PromptManager:
     """
@@ -77,6 +77,8 @@ class PromptManager:
             "retrieved_experience": context.get("retrieved_experience", ""),
             # 控制 CTF 场景优化 - 基于全局配置
             "use_ctf_optimizations": SCENARIO_MODE == "ctf",
+            # 运行时配置值，避免在模板中硬编码
+            "executor_max_steps": EXECUTOR_MAX_STEPS,
         }
 
         # 3. 动态规划特有部分
@@ -148,6 +150,7 @@ class PromptManager:
             "tools_section": tools_section,
             "failure_patterns": failure_patterns_text,
             "active_constraints": context.get("active_constraints", []),
+            "active_hypotheses": context.get("active_hypotheses", []),
             "use_ctf_optimizations": SCENARIO_MODE == "ctf",
         }
 
@@ -244,6 +247,11 @@ class PromptManager:
 - **工具调用语法**: 工具调用必须在 `execution_operations` 的 `action` 字段中定义,格式为 `{{"tool": "工具名称", "params": {{...}} }}`。
 - **严格匹配**: 工具名称和参数必须完全匹配可用工具列表中的定义。
 - **RAG失败升级**: 知识检索多次无效且陷入僵局时,**必须**调用 `expert_analysis`,并附上检索词、源类型、关键证据与错误摘要作为上下文。
+
+**本地工具（直接调用，无 MCP 延迟）**:
+- `query_causal_graph`: 精确查询因果图节点，从中提取历史证据、已确认漏洞的 PoC 参数、认证令牌等。
+  - 参数: `node_type` (str, 可选, 如 "ConfirmedVulnerability"/"KeyFact"/"Hypothesis"), `query` (str, 可选, 关键词过滤), `limit` (int, 可选, 默认 10)
+  - 示例: `{{"tool": "query_causal_graph", "params": {{"node_type": "ConfirmedVulnerability", "limit": 5}}}}`
 """
 
         return tools_section
