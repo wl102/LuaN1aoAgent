@@ -29,9 +29,12 @@ class Chunk:
 class MarkdownChunker:
     """文档分块器 - 通用Markdown分块处理。"""
 
-    def __init__(self, min_chunk_size: int = 60, max_chunk_size: int = 1000):
+    def __init__(self, min_chunk_size: int = 60, max_chunk_size: int = 512, chunk_overlap: int = 64):
         self.min_chunk_size = min_chunk_size
         self.max_chunk_size = max_chunk_size
+        self.chunk_overlap = chunk_overlap
+        if self.chunk_overlap >= self.max_chunk_size:
+            raise ValueError("chunk_overlap must be smaller than max_chunk_size.")
 
     def _split_by_headers(self, content: str) -> List[Tuple[str, str]]:
         """按Markdown标题分割。"""
@@ -71,33 +74,79 @@ class MarkdownChunker:
         return [p for p in parts if p]
 
     def _split_by_semantic_boundaries(self, content: str) -> List[str]:
-        """按语义边界分割（句子、段落）。"""
-        # 按段落分割
-        paragraphs = content.split("\n\n")
+        """按语义边界分割（句子、段落），并支持重叠。"""
+        # 使用更通用的文本分割器，例如按句子或段落
+        # 这里为了简化，我们仍然以段落为基础，但逻辑会改变
+        
+        # 简单的按字符分割，更可靠的实现需要考虑句子边界
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.max_chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            length_function=len,
+        )
+        return text_splitter.split_text(content)
+
+    def chunk(self, doc_id: str, content: str) -> List[Chunk]:
+        """
+        将Markdown文档内容分块。
+        这个实现是一个简化的例子，可以根据需要扩展。
+        """
+        # 这是一个简化的chunk逻辑，实际应用中可能需要更复杂的结构化解析
+        # 例如，先按标题分割，再在每个部分内按代码和语义分割
+        
+        # 示例：直接使用语义边界分割
+        text_chunks = self._split_by_semantic_boundaries(content)
+        
         chunks = []
+        for i, text_chunk in enumerate(text_chunks):
+            if not text_chunk.strip():
+                continue
+            
+            chunk_id = f"{doc_id}::chunk::{i}"
+            chunks.append(
+                Chunk(
+                    id=chunk_id,
+                    content=text_chunk,
+                    metadata={"source": doc_id},
+                    doc_id=doc_id,
+                    chunk_index=i,
+                    chunk_type="text",
+                    position=i, # 简化处理
+                )
+            )
+            
+        return chunks
 
-        current_chunk = []
-        current_length = 0
 
-        for paragraph in paragraphs:
-            para_length = len(paragraph)
+# 为了实现重叠分块，我们需要一个文本分割器
+# 这里我们引入一个简化的 RecursiveCharacterTextSplitter 概念
+# 在实际项目中，可以考虑使用成熟的库如 langchain.text_splitter
+class RecursiveCharacterTextSplitter:
+    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 64, length_function=len):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self._length_function = length_function
 
-            # 如果当前块为空，直接添加
-            if not current_chunk:
-                current_chunk.append(paragraph)
-                current_length = para_length
-            # 如果添加这个段落不会超过最大长度，就添加到当前块
-            elif current_length + para_length + 2 <= self.max_chunk_size:
-                current_chunk.append(paragraph)
-                current_length += para_length + 2  # +2 for newlines
-            else:
-                # 当前块已满，保存并开始新块
-                if current_chunk:
-                    chunks.append("\n\n".join(current_chunk))
-                current_chunk = [paragraph]
-                current_length = para_length
+    def split_text(self, text: str) -> List[str]:
+        if len(text) <= self.chunk_size:
+            return [text]
 
-        # 添加最后一个块
+        chunks = []
+        start_index = 0
+        while start_index < len(text):
+            end_index = start_index + self.chunk_size
+            chunk = text[start_index:end_index]
+            chunks.append(chunk)
+            
+            # 如果已经是最后一块，则退出
+            if end_index >= len(text):
+                break
+                
+            # 移动到下一个块的起始位置
+            start_index += self.chunk_size - self.chunk_overlap
+            
+        return chunks
+
         if current_chunk:
             chunks.append("\n\n".join(current_chunk))
 
