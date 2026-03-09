@@ -413,6 +413,9 @@ def schedule_coroutine(coro):
         def handle_result(t):
             try:
                 t.result()
+            except asyncio.CancelledError:
+                # Silently ignore task cancellation during shutdown
+                pass
             except Exception as e:
                 print(f"Background task failed: {e}")
                 import traceback

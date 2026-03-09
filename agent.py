@@ -39,6 +39,10 @@ import psutil
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
+from rich.live import Live
+from rich.status import Status
+from rich.markup import escape
 
 from core.console import set_console, init_console_with_file, console_proxy as console
 from llm.llm_client import LLMClient
@@ -1119,7 +1123,7 @@ async def run_standalone_react(goal: str, task_name: str, log_dir: str, args: ar
                 console.print(Panel(f"ReAct 模式执行结束，状态: {status}", style="yellow"))
             
     except Exception as e:
-        console.print(Panel(f"ReAct 模式执行发生错误: {e}", style="bold red"))
+        console.print(Panel(f"ReAct 模式执行发生错误: {escape(str(e))}", style="bold red"))
         metrics["error"] = str(e)
     finally:
         metrics["end_time"] = time.time()
@@ -1309,7 +1313,7 @@ async def main():
             ))
 
         metrics["task_id"] = task_id
-        console.print(Panel(f"Task: {task_name}\nTask ID: {task_id}\nGoal: {goal}", title="任务初始化", style="bold green"))
+        console.print(Panel(f"Task: {escape(task_name)}\nTask ID: {escape(task_id)}\nGoal: {escape(goal)}", title="任务初始化", style="bold green"))
         run_log.append({"event": "task_initialized", "task_id": task_id, "goal": goal, "timestamp": time.time()})
 
         # 消融实验检查：Mode C (ReAct)
@@ -1368,9 +1372,9 @@ async def main():
             causal_graph_summary = graph_manager.get_causal_graph_summary()
             initial_ops, call_metrics = await planner.plan(goal, causal_graph_summary)
         except Exception as e:
-            console.print(Panel(f"规划阶段出现错误: {str(e)}", title="Planner Error", style="bold red"))
+            console.print(Panel(f"规划阶段出现错误: {escape(str(e))}", title="Planner Error", style="bold red"))
             import traceback
-            console.print(traceback.format_exc())
+            console.print(escape(traceback.format_exc()))
             # Update session status to failed
             try:
                 await update_session_status(op_id, "failed")
@@ -1852,7 +1856,7 @@ async def main():
                 except Exception as e:
                     import traceback
                     error_message = str(e)
-                    console.print(Panel(f"处理子任务 {subtask_id} 结果时发生严重错误: {error_message}\n{traceback.format_exc()}", title="错误", style="bold red"))
+                    console.print(Panel(f"处理子任务 {escape(subtask_id)} 结果时发生严重错误: {escape(error_message)}\n{escape(traceback.format_exc())}", title="错误", style="bold red"))
                     graph_manager.update_node(subtask_id, {'status': 'completed_error', 'summary': f"Critical error during reflection: {error_message}"})
                     # Clean up staged nodes even if an error occurred
                     graph_manager.clear_staged_causal_nodes(subtask_id)
