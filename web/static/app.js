@@ -2169,8 +2169,19 @@ function renderLLMResponse(msg, isHistory = false) {
   // 2. 解析内容
   let content = data;
   if (content && content.content) content = content.content;
-  if (typeof content === 'string' && (content.trim().startsWith('{') || content.trim().startsWith('['))) {
-    try { content = JSON.parse(content); } catch (e) { }
+  if (typeof content === 'string') {
+    // Strip markdown code fences (```json ... ```) that LLMs often wrap responses in
+    let trimmed = content.trim();
+    if (trimmed.startsWith('```')) {
+      // Remove opening fence (```json, ```JSON, ``` etc.)
+      trimmed = trimmed.replace(/^```\w*\s*\n?/, '');
+      // Remove closing fence
+      trimmed = trimmed.replace(/\n?```\s*$/, '');
+      trimmed = trimmed.trim();
+    }
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try { content = JSON.parse(trimmed); } catch (e) { }
+    }
   }
 
   // 3. 构建 HTML 内容

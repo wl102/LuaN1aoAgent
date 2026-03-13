@@ -177,7 +177,7 @@ TOOL_TIMEOUTS: dict = {
     # 标准工具
     "http_request":      int(os.getenv("TOOL_TIMEOUT_HTTP",       "60")),
     "shell_exec":        int(os.getenv("TOOL_TIMEOUT_SHELL",      "120")),
-    "python_exec":       int(os.getenv("TOOL_TIMEOUT_PYTHON",     "60")),
+    "python_exec":       int(os.getenv("TOOL_TIMEOUT_PYTHON",     "300")),
     "web_search":        int(os.getenv("TOOL_TIMEOUT_WEB_SEARCH", "30")),
     "search_exploit":    int(os.getenv("TOOL_TIMEOUT_SEARCH_EXPLOIT", "30")),
     # 轻量工具
