@@ -406,7 +406,7 @@ def main():
         for doc_id, content, meta in to_upsert_docs:
             try:
                 # 对文档进行分块
-                chunks = chunker.chunk_document(doc_id, content)
+                chunks = chunker.chunk(doc_id, content)
                 print(f"[INFO] 文档 {doc_id} 被分为 {len(chunks)} 个分块")
 
                 # 为每个分块生成嵌入向量
