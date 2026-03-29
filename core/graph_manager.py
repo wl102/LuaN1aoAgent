@@ -226,6 +226,7 @@ class GraphManager:
                     "SystemProperty": "SystemProperty",
                     "TargetArtifact": "TargetArtifact",
                     "key_fact": "KeyFact",
+                    "AttackGoal": "AttackGoal",
                 }
                 artifact["node_type"] = mapping.get(legacy_type, legacy_type)
             else:
@@ -256,6 +257,16 @@ class GraphManager:
             if artifact.get("node_type") == "ConfirmedVulnerability":
                 artifact["confidence"] = artifact.get("confidence", 0.99)
                 artifact["status"] = artifact.get("status", "CONFIRMED")
+
+            # AttackGoal special handling
+            if artifact.get("node_type") == "AttackGoal":
+                artifact["status"] = artifact.get("status", "pending")
+                artifact["goal_type"] = artifact.get("goal_type", "other")
+                artifact["target_privilege_level"] = artifact.get("target_privilege_level", "unknown")
+                artifact["satisfaction_criteria"] = artifact.get("satisfaction_criteria", "")
+                artifact["prerequisites"] = artifact.get("prerequisites", [])
+                artifact["alternative_paths"] = artifact.get("alternative_paths", [])
+                artifact["joint_threat_score"] = float(artifact.get("joint_threat_score") or 0.0)
 
             self.causal_graph.add_node(node_id, **artifact)
             self._touch_causal_graph()
@@ -318,6 +329,11 @@ class GraphManager:
             "REVEAL": "REVEALS", "REVEALS": "REVEALS",
             "EXPLOIT": "EXPLOITS", "EXPLOITS": "EXPLOITS",
             "MITIGATE": "MITIGATES", "MITIGATES": "MITIGATES",
+            # AttackGoal edge labels
+            "ENABLE": "ENABLES", "ENABLES": "ENABLES",
+            "REQUIRE": "REQUIRES", "REQUIRES": "REQUIRES",
+            "ALTERNATIVE": "ALTERNATIVE_FOR", "ALTERNATIVE_FOR": "ALTERNATIVE_FOR",
+            "ALT_FOR": "ALTERNATIVE_FOR",
         }
         return mapping.get(norm, norm)
 
@@ -464,6 +480,7 @@ class GraphManager:
         attack_paths: List[Dict[str, Any]] = []
         evidence_nodes = [n for n, d in self.causal_graph.nodes(data=True) if (d.get("node_type") or d.get("type")) == "Evidence"]
         vulnerability_nodes = [n for n, d in self.causal_graph.nodes(data=True) if (d.get("node_type") in {"Vulnerability", "PossibleVulnerability", "ConfirmedVulnerability"} or d.get("type") in {"Vulnerability", "PossibleVulnerability", "ConfirmedVulnerability"})]
+        exploit_nodes = [n for n, d in self.causal_graph.nodes(data=True) if (d.get("node_type") or d.get("type")) == "Exploit"]
 
         if not evidence_nodes or not vulnerability_nodes:
             self._attack_paths_cache = []
@@ -510,16 +527,223 @@ class GraphManager:
                         except (ValueError, TypeError):
                             cvss_score = 0.0
                         final_score = path_score * (cvss_score / 10.0)
-                        attack_paths.append({"path": path_details, "score": final_score})
+
+                        # Extend path: Vulnerability -> Exploit (if exists) -> AttackGoal (if exists)
+                        extended_path = self._extend_path_to_attack_goal(
+                            path, path_details, final_score
+                        )
+                        if extended_path:
+                            attack_paths.append(extended_path)
+                        else:
+                            attack_paths.append({"path": path_details, "score": final_score})
                 except (nx.NetworkXNoPath, nx.NodeNotFound):
                     continue
             if pair_count > max_pairs:
                 break
 
         sorted_paths = sorted(attack_paths, key=lambda x: x["score"], reverse=True)
+
+        # Analyze AttackGoal convergence
+        convergence_analysis = self._analyze_attack_goal_convergence(sorted_paths)
+
+        # Update AttackGoal joint_threat_score and add convergence info to paths
+        for path_info in sorted_paths:
+            path = path_info.get("path", [])
+            if path:
+                reached_goal = self._find_reached_attack_goal_from_path(path)
+                if reached_goal and reached_goal in convergence_analysis:
+                    path_info["reached_goal"] = reached_goal
+                    path_info["convergence_info"] = convergence_analysis[reached_goal]
+
         self._attack_paths_cache = sorted_paths
         self._attack_paths_cache_version = self._causal_graph_version
         return list(sorted_paths)
+
+    def _extend_path_to_attack_goal(
+        self,
+        path: tuple,  # networkx returns tuple
+        path_details: List[Dict[str, Any]],
+        base_score: float
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Extend a path from Vulnerability through Exploit to AttackGoal.
+
+        Returns:
+            Extended path dict with reached_goal, or None if no goal reachable.
+            Note: 'score' field contains the path's independent score.
+            The cumulative joint score is computed separately in _analyze_attack_goal_convergence.
+        """
+        if not path:
+            return None
+
+        last_node = path[-1]
+        last_node_type = self.causal_graph.nodes[last_node].get("node_type", "")
+
+        # Only extend from Vulnerability nodes
+        if last_node_type not in {"Vulnerability", "PossibleVulnerability", "ConfirmedVulnerability"}:
+            return None
+
+        # Try to find Exploit reachable from this Vulnerability
+        for successor in self.causal_graph.successors(last_node):
+            edge_data = self.causal_graph.get_edge_data(last_node, successor)
+            if not edge_data:
+                continue
+
+            edge_label = edge_data.get("label", "")
+            succ_type = self.causal_graph.nodes[successor].get("node_type", "")
+
+            # Found an Exploit
+            if succ_type == "Exploit" and edge_label in {"EXPLOITS", "LEADS_TO"}:
+                # Build extended path details
+                extended_details = list(path_details)
+                extended_details.append({
+                    "id": successor,
+                    "type": succ_type,
+                    "description": self.causal_graph.nodes[successor].get("description", ""),
+                })
+
+                # Check if Exploit ENABLES an AttackGoal
+                goal_id = self._find_reached_attack_goal(successor)
+                if goal_id:
+                    extended_details.append({
+                        "id": goal_id,
+                        "type": "AttackGoal",
+                        "description": self.causal_graph.nodes[goal_id].get("description", ""),
+                    })
+                    # Update joint_threat_score in graph (for cumulative tracking)
+                    self._compute_joint_score(goal_id, base_score)
+                    # Return with path's independent score, not cumulative
+                    return {
+                        "path": extended_details,
+                        "score": base_score,  # Use independent score, not joint
+                        "reached_goal": goal_id,
+                    }
+                else:
+                    # Exploit found but no AttackGoal - return path with exploit
+                    return {
+                        "path": extended_details,
+                        "score": base_score,
+                    }
+
+        return None
+
+    def _find_reached_attack_goal_from_path(self, path: List[Dict[str, Any]]) -> Optional[str]:
+        """Find if any node in the path has an ENABLES edge to an AttackGoal."""
+        for node_info in path:
+            node_id = node_info.get("id")
+            if not node_id:
+                continue
+            goal_id = self._find_reached_attack_goal(node_id)
+            if goal_id:
+                return goal_id
+        return None
+
+    def _find_reached_attack_goal(self, node_id: str) -> Optional[str]:
+        """Find if a node has an ENABLES edge to an AttackGoal."""
+        if not self.causal_graph.has_node(node_id):
+            return None
+        for successor in self.causal_graph.successors(node_id):
+            edge_data = self.causal_graph.get_edge_data(node_id, successor)
+            if edge_data and edge_data.get("label") == "ENABLES":
+                succ_data = self.causal_graph.nodes[successor]
+                if succ_data.get("node_type") == "AttackGoal":
+                    return successor
+        return None
+
+    def _compute_joint_score(self, goal_id: str, path_score: float) -> float:
+        """
+        Compute joint threat score for a path reaching an AttackGoal.
+
+        Joint score = 1 - ∏(1 - path_score_i) for all paths reaching same goal
+        This represents the probability of at least one path succeeding.
+        Capped at 0.95 to avoid overconfidence.
+        """
+        if not self.causal_graph.has_node(goal_id):
+            return path_score
+
+        goal_data = self.causal_graph.nodes[goal_id]
+        existing_score = float(goal_data.get("joint_threat_score") or 0.0)
+
+        # Joint probability: P(at least one path succeeds) = 1 - ∏(1 - p_i)
+        new_score = existing_score + path_score * (1 - existing_score)
+        new_score = min(new_score, 0.95)
+
+        # Update stored score
+        self.causal_graph.nodes[goal_id]["joint_threat_score"] = new_score
+
+        return new_score
+
+    def _analyze_attack_goal_convergence(self, attack_paths: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """
+        Analyze multiple attack paths converging on the same AttackGoal.
+
+        Returns:
+            Dict[goal_id] -> {
+                "paths_count": number of paths reaching this goal,
+                "paths": list of path summaries,
+                "joint_score": computed joint threat score,
+                "and_dependencies": list of REQUIRES edge prerequisites,
+                "alternative_paths": list of ALTERNATIVE_FOR edges,
+                "status": overall goal status
+            }
+        """
+        convergence: Dict[str, Dict[str, Any]] = {}
+
+        for path_info in attack_paths:
+            path = path_info.get("path", [])
+            reached_goal = self._find_reached_attack_goal_from_path(path)
+            if not reached_goal:
+                continue
+
+            if reached_goal not in convergence:
+                goal_data = self.causal_graph.nodes[reached_goal]
+                convergence[reached_goal] = {
+                    "goal_description": goal_data.get("description", ""),
+                    "goal_type": goal_data.get("goal_type", "unknown"),
+                    "target_privilege": goal_data.get("target_privilege_level", "unknown"),
+                    "paths_count": 0,
+                    "paths": [],
+                    "joint_score": 0.0,
+                    "and_dependencies": [],
+                    "alternative_paths": [],
+                    "status": goal_data.get("status", "pending"),
+                }
+
+                # Collect AND dependencies (REQUIRES edges) - these are prerequisites INTO the goal
+                for predecessor in self.causal_graph.predecessors(reached_goal):
+                    edge_data = self.causal_graph.get_edge_data(predecessor, reached_goal)
+                    if edge_data and edge_data.get("label") == "REQUIRES":
+                        pred_data = self.causal_graph.nodes[predecessor]
+                        convergence[reached_goal]["and_dependencies"].append({
+                            "id": predecessor,
+                            "type": pred_data.get("node_type"),
+                            "description": pred_data.get("description", "")[:80],
+                        })
+
+                # Collect OR alternatives (ALTERNATIVE_FOR edges) - from goal to alternatives
+                for successor in self.causal_graph.successors(reached_goal):
+                    edge_data = self.causal_graph.get_edge_data(reached_goal, successor)
+                    if edge_data and edge_data.get("label") == "ALTERNATIVE_FOR":
+                        succ_data = self.causal_graph.nodes[successor]
+                        convergence[reached_goal]["alternative_paths"].append({
+                            "id": successor,
+                            "type": succ_data.get("node_type"),
+                            "description": succ_data.get("description", "")[:80],
+                        })
+
+            convergence[reached_goal]["paths_count"] += 1
+            convergence[reached_goal]["paths"].append({
+                "path_ids": [n.get("id") for n in path],
+                "score": path_info["score"],
+            })
+
+            # Update joint score
+            existing = convergence[reached_goal]["joint_score"]
+            convergence[reached_goal]["joint_score"] = min(
+                existing + path_info["score"] * (1 - existing), 0.95
+            )
+
+        return convergence
 
     def _find_contradiction_clusters(self) -> List[Dict[str, Any]]:
         clusters = []
@@ -1072,6 +1296,15 @@ class GraphManager:
                 payload = data.get("exploit_payload", "")[:50]
                 expected = data.get("expected_outcome", "")[:40]
                 summary_lines.append(f"- [Exploit] {node_id} · type={etype} · payload={payload} · expected={expected}")
+            elif node_type == "AttackGoal":
+                goal_type = data.get("goal_type", "unknown")
+                privilege = data.get("target_privilege_level", "unknown")
+                status = data.get("status", "pending")
+                score = data.get("joint_threat_score", 0.0)
+                summary_lines.append(
+                    f"- [AttackGoal:{goal_type}] {node_id} · {desc} · "
+                    f"privilege={privilege} · status={status} · joint_score={score}"
+                )
             else:
                 summary_lines.append(f"- [{node_type}] {node_id} · {str(data)[:80]}...")
 
@@ -1162,7 +1395,8 @@ class GraphManager:
             "credential": [(n, d) for n, d in nodes if self._get_node_type(d) == "Credential"],
             "system_property": [(n, d) for n, d in nodes if self._get_node_type(d) == "SystemProperty"],
             "target_artifact": [(n, d) for n, d in nodes if self._get_node_type(d) == "TargetArtifact"],
-            "unknown": [(n, d) for n, d in nodes if self._get_node_type(d) not in {"Evidence", "Hypothesis", "PossibleVulnerability", "Vulnerability", "ConfirmedVulnerability", "Credential", "SystemProperty", "TargetArtifact"}],
+            "attack_goal": [(n, d) for n, d in nodes if self._get_node_type(d) == "AttackGoal"],
+            "unknown": [(n, d) for n, d in nodes if self._get_node_type(d) not in {"Evidence", "Hypothesis", "PossibleVulnerability", "Vulnerability", "ConfirmedVulnerability", "Credential", "SystemProperty", "TargetArtifact", "AttackGoal"}],
         }
 
     def _get_node_style(self, node_type: str, node_status: str, node_confidence: Any) -> str:
@@ -1180,6 +1414,15 @@ class GraphManager:
                 style += " dim"
         elif node_type == "ConfirmedVulnerability":
             style = "bold magenta reverse"
+        elif node_type == "AttackGoal":
+            if node_status == "achieved":
+                style = "bold green reverse"
+            elif node_status == "in_progress":
+                style = "bold yellow"
+            elif node_status == "blocked":
+                style = "bold red"
+            else:
+                style = "bold cyan"
         return style
 
     def _format_confidence(self, val: Any) -> str:
@@ -1217,38 +1460,51 @@ class GraphManager:
             node_branch.add(f"来源: {data.get('source', 'N/A')}")
 
     def _add_node_details(self, node_branch, node_type: str, data: Dict[str, Any]) -> None:
+        from rich.markup import escape
         if node_type == "Evidence":
-            node_branch.add(f"来源: {data.get('source_step_id', data.get('source', 'N/A'))}")
+            node_branch.add(f"来源: {escape(str(data.get('source_step_id', data.get('source', 'N/A'))))}")
             findings = data.get("extracted_findings")
             if findings and isinstance(findings, dict):
                 for key, value in findings.items():
-                    node_branch.add(f"{key}: {str(value)}")
+                    node_branch.add(f"{escape(str(key))}: {escape(str(value))}")
             else:
                 evidence_data = data.get("data", {})
                 if not evidence_data and "finding" in data:
                     evidence_data = data
-                node_branch.add(f"发现: {evidence_data.get('finding', data.get('description', 'N/A'))}")
+                node_branch.add(f"发现: {escape(str(evidence_data.get('finding', data.get('description', 'N/A'))))}")
         elif node_type == "Hypothesis":
-            node_branch.add(f"描述: {data.get('description', 'N/A')}")
+            node_branch.add(f"描述: {escape(str(data.get('description', 'N/A')))}")
             if "hypothesis" in data:
-                node_branch.add(f"假设: {data.get('hypothesis', 'N/A')}")
+                node_branch.add(f"假设: {escape(str(data.get('hypothesis', 'N/A')))}")
         elif node_type == "Vulnerability":
-            node_branch.add(f"描述: {data.get('description', 'N/A')}")
-            node_branch.add(f"CVSS分数: {data.get('cvss_score', 'N/A')}")
+            node_branch.add(f"描述: {escape(str(data.get('description', 'N/A')))}")
+            node_branch.add(f"CVSS分数: {escape(str(data.get('cvss_score', 'N/A')))}")
         elif node_type == "Credential":
             self._add_credential_details(node_branch, data)
         elif node_type == "SystemProperty":
             self._add_system_property_details(node_branch, data)
         elif node_type == "TargetArtifact":
             self._add_target_artifact_details(node_branch, data)
+        elif node_type == "AttackGoal":
+            node_branch.add(f"目标类型: {escape(str(data.get('goal_type', 'unknown')))}")
+            node_branch.add(f"目标权限: {escape(str(data.get('target_privilege_level', 'unknown')))}")
+            node_branch.add(f"达成条件: {escape(str(data.get('satisfaction_criteria', 'N/A')))}")
+            if data.get('prerequisites'):
+                prereqs = ', '.join(str(p) for p in data.get('prerequisites', []))
+                node_branch.add(f"前置条件 (AND): {escape(prereqs)}")
+            if data.get('alternative_paths'):
+                alts = ', '.join(str(a) for a in data.get('alternative_paths', []))
+                node_branch.add(f"替代路径 (OR): {escape(alts)}")
+            node_branch.add(f"联合威胁评分: {data.get('joint_threat_score', 0.0):.2f}")
         else:
             for key, value in data.items():
                 if key not in ["node_type", "status", "confidence"]:
-                    node_branch.add(f"{key}: {str(value)[:100]}...")
+                    node_branch.add(f"{escape(str(key))}: {escape(str(value)[:100])}...")
 
     def print_causal_graph(self, console, max_nodes: int = 50) -> None:
         if not console:
             raise ValueError("console 实例不能为空")
+        from rich.markup import escape
         if not self.causal_graph or self.causal_graph.number_of_nodes() == 0:
             console.print("因果链图谱为空。", style="dim")
             return
@@ -1268,10 +1524,12 @@ class GraphManager:
             node_status = data.get("status", "N/A")
             node_confidence = data.get("confidence", "N/A")
             style = self._get_node_style(node_type, node_status, node_confidence)
-            node_label = f"[{style}]{node_id}[/]" if style else node_id
-            node_label += f" (类型: {node_type})"
+            
+            safe_node_id = escape(str(node_id))
+            node_label = f"[{style}]{safe_node_id}[/]" if style else safe_node_id
+            node_label += f" (类型: {escape(str(node_type))})"
             if node_type in ["Hypothesis", "ConfirmedVulnerability"]:
-                node_label += f" (状态: {node_status}, 置信度: {self._format_confidence(node_confidence)})"
+                node_label += f" (状态: {escape(str(node_status))}, 置信度: {self._format_confidence(node_confidence)})"
             node_branch = nodes_tree.add(node_label)
             self._add_node_details(node_branch, node_type, data)
         if temp_graph.number_of_edges() > 0:
@@ -1283,7 +1541,7 @@ class GraphManager:
                     edge_style = "red"
                 elif label == "EXPLOITS":
                     edge_style = "bold magenta"
-                edge_label = f"[{edge_style}]{u}[/] --[{label}]--> [{edge_style}]{v}[/]"
+                edge_label = f"[{edge_style}]{escape(str(u))}[/] --[{escape(str(label))}]--> [{edge_style}]{escape(str(v))}[/]"
                 edges_tree.add(edge_label)
         console.print(tree)
 

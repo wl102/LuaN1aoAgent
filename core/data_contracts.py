@@ -171,7 +171,46 @@ class ExploitNode(BaseCausalNode):
         self.node_type = "Exploit"
 
 
-CausalNode = Union[EvidenceNode, HypothesisNode, VulnerabilityNode, ExploitNode]
+CausalNode = Union[EvidenceNode, HypothesisNode, VulnerabilityNode, ExploitNode, "AttackGoalNode"]
+
+
+@dataclass
+class AttackGoalNode(BaseCausalNode):
+    """
+    攻击目标节点：表示战略级攻击目标，是多个攻击路径的汇聚点。
+
+    用于表达高级攻击目标（如"获取 www-data shell"、"数据库提取"），
+    支持多路径汇聚推理和 AND/OR 依赖逻辑。
+
+    Attributes:
+        description: 攻击目标的详细描述
+        goal_type: 目标类型，如 shell, data_extraction, credential_access,
+                   privilege_escalation, persistence, lateral_movement
+        target_privilege_level: 目标权限级别，如 www-data, root, admin
+        satisfaction_criteria: 判定目标达成满足条件的描述
+        prerequisites: 达成此目标所需的前置条件列表（用于 AND 逻辑）
+        alternative_paths: 可选的替代攻击路径列表（用于 OR 逻辑）
+        joint_threat_score: 多个路径汇聚时的联合威胁评分（0.0-1.0）
+        status: 目标状态，pending/in_progress/achieved/blocked
+        attack_surface: 攻击面描述，如 web_application, network_service
+    """
+
+    description: str
+    goal_type: Literal[
+        "shell", "data_extraction", "credential_access",
+        "privilege_escalation", "persistence", "lateral_movement", "other"
+    ] = "other"
+    target_privilege_level: str = "unknown"
+    satisfaction_criteria: str = ""
+    prerequisites: List[str] = field(default_factory=list)
+    alternative_paths: List[str] = field(default_factory=list)
+    joint_threat_score: float = 0.0
+    status: Literal["pending", "in_progress", "achieved", "blocked"] = "pending"
+    attack_surface: str = "unknown"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.node_type = "AttackGoal"
 
 
 @dataclass
@@ -185,13 +224,16 @@ class CausalEdge:
     Attributes:
         source_id: 源节点ID
         target_id: 目标节点ID
-        label: 边标签，SUPPORTS/CONTRADICTS/REVEALS/EXPLOITS/MITIGATES
+        label: 边标签，支持 SUPPORTS/CONTRADICTS/REVEALS/EXPLOITS/MITIGATES/ENABLES/REQUIRES/ALTERNATIVE_FOR
         description: 关系的详细描述（可选）
     """
 
     source_id: str
     target_id: str
-    label: Literal["SUPPORTS", "CONTRADICTS", "REVEALS", "EXPLOITS", "MITIGATES"]
+    label: Literal[
+        "SUPPORTS", "CONTRADICTS", "REVEALS", "EXPLOITS", "MITIGATES",
+        "ENABLES", "REQUIRES", "ALTERNATIVE_FOR"
+    ]
     description: Optional[str] = None
 
 

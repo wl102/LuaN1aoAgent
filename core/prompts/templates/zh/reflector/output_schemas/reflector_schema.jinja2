@@ -38,7 +38,7 @@
   "causal_graph_updates": {
     "nodes": [
       {
-        "node_type": "KeyFact | Evidence | Hypothesis | ConfirmedVulnerability | SystemImplementation | Exploit | TargetArtifact",
+        "node_type": "KeyFact | Evidence | Hypothesis | ConfirmedVulnerability | SystemImplementation | Exploit | TargetArtifact | AttackGoal",
         "id": "temp_node_1",
         "source_step_id": "step_X",
         "description": "节点的描述。",
@@ -49,9 +49,16 @@
       {
         "source_id": "temp_node_1",
         "target_id": "existing_node_abc",
-        "label": "SUPPORTS | CONTRADICTS | FALSIFIES | CAUSED_BY | INFORMS | DESCRIBES | LEADS_TO",
+        "label": "SUPPORTS | CONTRADICTS | FALSIFIES | CAUSED_BY | INFORMS | DESCRIBES | LEADS_TO | ENABLES | REQUIRES | ALTERNATIVE_FOR",
         "evidence_strength": "（可选）证据强度：'necessary'（决定性证据，可一票确认/否决假设）| 'contingent'（累积性证据，需多次验证）。若未指定则由系统自动判断。",
         "description": "关系解释。例如：'证据 temp_node_1 支持假设 existing_node_abc。'"
       }
     ]
-  }
+  },
+  "candidate_memories": [
+    {
+      "content": "具体的经验、教训或方法论描述。例如：'在处理 PHP 8.1 目标时，首选检查 8.1.0-dev 后门漏洞。' (必须是高度概括且可复用的内容)",
+      "context": "该经验适用的具体场景或前置条件。",
+      "importance": 0.8
+    }
+  ]
