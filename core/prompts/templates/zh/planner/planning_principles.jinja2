@@ -46,20 +46,23 @@
 当因果图中出现竞争假设时（同一证据支持多个互斥假设），创建专门的**消歧子任务**交由 Executor 处理，
 而非由 Planner 直接推断结论。优先验证影响最大的假设（RCE > SQLi > 信息泄露）。
 
-### 8. AttackGoal 预设（从用户 goal 推导）
-当存在全局目标时，必须推导对应的战略 AttackGoal，并在因果图中创建该节点：
+### 8. AttackGoal 推导（从用户 goal 自动推导）
+**AttackGoal 不是子任务！** 它是 Planner 的战略上下文，用于指导攻击路径收敛。
+
+**推导规则：**
+- Planner 在生成首个 `ADD_NODE` 操作前，应根据用户 goal 自动推导出对应的 AttackGoal
+- AttackGoal 作为**上下文信息**记录在 Planner 的规划决策中，**不需要创建子任务来"生成"它**
+- 如果 Planner 输出 `causal_graph_updates.nodes` 中包含 AttackGoal 节点，系统会自动将其添加到因果图
 
 | 用户 goal 模式 | AttackGoal goal_type | target_privilege_level |
 |---------------|---------------------|----------------------|
 | shell / get shell / RCE / 命令执行 | shell | www-data / root |
-| 数据 / database / extract / 提取 | data_extraction | - |
+| 数据 / database / extract / 提取 / flag | data_extraction | - |
 | 凭据 / credential / password / 密码 | credential_access | - |
 | 提权 / privilege / root / escalation | privilege_escalation | root |
 | 持久化 / persistence | persistence | - |
 | 横向移动 / lateral / 移动 | lateral_movement | - |
 
-**AttackGoal 预设规则：**
-- 在规划初期（首次 `ADD_NODE` 操作时），必须同步创建对应的 AttackGoal 节点
-- AttackGoal 的 `id` 应简洁，如 `goal_shell`、`goal_data_extraction`
-- 通过 `ENABLES` 边将 ConfirmedVulnerability/Exploit 与 AttackGoal 关联
+**AttackGoal 动态更新：**
+- 随着渗透测试进展，如果发现更高价值的目标（如从 SQLi 发现还能 RCE），应通过 `causal_graph_updates` 动态添加新的 AttackGoal
 - Executor 在执行过程中发现新的攻击机会时，可通过 `staged_causal_nodes` 提交新的 AttackGoal
