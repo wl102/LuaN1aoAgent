@@ -86,3 +86,5 @@ htmlcov/
 
 # pyenv
 .python-version
+
+CLAUDE.md
